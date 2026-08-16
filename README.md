@@ -58,61 +58,90 @@ bound in the 3D View keymap, so they do not shadow keys in other editors.
 
 ## What's in it
 
+Two halves, and it's worth being straight about which is which. The tools below
+have no built-in equivalent — they're the reason to install it. Further down are
+the batch operations and shortcuts that make it pleasant day to day.
+
+---
+
+## The distinctive part
+
 ### Assign to Category
-Selection-driven scene organisation. Select the floor meshes, pick **Floor**,
-hit **Add** — they go straight into the right collection.
+Select the floor meshes, pick **Floor**, click. They go straight into the right
+collection.
 
-Point it at a **project root collection** and it works with the hierarchy you
-already have: categories resolve to collections that exist inside that root, so
-clicking Floor drops the selection into `PRODUCTION ▸ MODULES ▸ FLOOR` rather
-than inventing a `Floor_MyProject` beside it. Quick Assign is rebuilt from the
-collections actually found under the root, and a picker chooses which of them
-get a button.
+Point it at a **project root** and it works with the hierarchy you already have,
+rather than inventing one beside it — clicking Floor drops the selection into
+`PRODUCTION ▸ MODULES ▸ FLOOR`. Quick Assign rebuilds its buttons from the
+collections actually found under that root, and a picker chooses which get one.
 
-With no project root set it falls back to 11 presets — Floor, Walls, Ceiling,
-Props, Decals, Trim, Modular, FX, Lights, Cameras, Blocking — plus free-text
-custom categories, naming new collections from a `{category}` / `{project}`
-pattern you control, with `{project}` read from the blend file name, the scene
-name, or a value you type.
+With no root set it falls back to 11 presets — Floor, Walls, Ceiling, Props,
+Decals, Trim, Modular, FX, Lights, Cameras, Blocking — plus free-text
+categories, naming new collections from a `{category}` / `{project}` pattern you
+control, with `{project}` read from the blend file, the scene, or a value you type.
 
-- **Move** or **link** — take objects out of their old collections, or leave
-  them in both.
-- Colour tags applied to collections that don't already have one, so **Color
-  Sync** picks them up without overwriting your own choices.
-- The destination is shown in the panel before you click, marked `(existing)`
-  when it resolves to a collection you already have.
+**Move** or **link**; colour tags applied only to collections that don't already
+have one; and the destination shown in the panel before you click, marked
+`(existing)` when it resolves to something you already have.
+
+### Arrange Scene, and auto-routing
+**Arrange Scene** sorts every object into matching collections by type and name,
+falling back to grouping by name stem. **Auto-route** does the same for new
+objects the moment you create them — a light or a camera lands in LIGHTS or
+CAMERAS without you doing anything. Toggle it off in preferences.
 
 ### Right-click ▸ Add to Collection
-In the 3D viewport and the outliner. Suggests a destination for the selection
-using the same matcher **Arrange Scene** uses, lists existing collections with
-object counts, creates new ones with a parent and colour tag, and offers a
+In the 3D viewport and the outliner. It **suggests** a destination for the
+selection using the same matcher Arrange Scene uses, lists existing collections
+with object counts, creates new ones with a parent and colour tag, and offers a
 search field past twenty collections instead of truncating the menu.
 
-### Scene organisation
+### Face Stretch Analyzer
+Colour-codes UV distortion as vertex colours across the whole selection, in the
+3D viewport — blue compressed, green even, red stretched. Run it again to
+restore your materials exactly.
+
+### Stacked UV Detector
+Finds objects sharing an identical UV layout and selects them, which is how
+stacked or accidentally-duplicated UVs surface before they reach a bake.
+
+### Silhouette Check and Cavity Preview
+One click each, per-viewport, restoring precisely the shading you had. They are
+mutually exclusive, so neither can strand the other's settings in your viewport.
+
+### Visibility Bookmarks
+Snapshot which collections are visible under a name, then restore that state
+later — useful when a scene has several working configurations.
+
+### Collection Color Sync
+Pushes each collection's colour tag onto its objects' viewport colour, walking
+the tree so nested collections inherit and a child's own tag wins.
+
+---
+
+## Batch work
+
+Things Blender can do, but not in one step.
+
+- **Batch Export** — each selected object to its own FBX / OBJ / GLB, with
+  optional prefix/suffix renaming and transform apply.
 - **Project Structure** — build a PRODUCTION ▸ STUDIO / MODULES / BLOCKING
   hierarchy, picking which collections you want.
-- **Arrange Scene** — sort every object into matching collections by type and
-  name, falling back to grouping by name stem.
-- **Auto-route** — new objects drop into a matching collection as you create
-  them. Toggle it off in preferences.
-- **Isolate Collection**, **Swap Collections**, **Select by Collection**,
-  **Rename by Collection**, **Visibility Bookmarks**, **Color Sync**.
-
-### Modelling and cleanup
-Origin tools including **Origin to Base**, **Drop It**, **Smart Duplicate**
-(copies stay in their collection), **WNormals + Bevel**, **Correct Normals**,
-**Clean Up Mesh**, **Generate LODs**, **Consolidate Materials**.
-
-### Analysis
-- **Silhouette Check** and **Cavity Preview** — per-viewport shading toggles
-  that restore exactly what you had.
-- **Face Stretch Analyzer** — colour-codes UV distortion across the selection.
-- **Stacked UV Detector** — finds objects sharing an identical UV layout.
+- **Generate LODs** — Decimate-reduced copies into an LODs collection.
+- **Consolidate Materials** — merge `Mat.001`/`Mat.002` back into `Mat`.
+- **Origin to Base** — origin to the bottom centre of the bounding box.
+- **Smart Duplicate** — copies stay in their original collection.
+- **Clean Up Mesh** — loose vertices and edges, optionally weld doubles.
+- **WNormals + Bevel** — bevel, weighted normals and shade smooth in one.
+- **Scene Snapshot** — timestamped copy of the .blend into `snapshots/`.
 - **Scene** and **Collection Statistics**.
 
-### Export
-**Batch Export** — each selected object to its own FBX / OBJ / GLB, with
-optional prefix/suffix renaming and transform apply.
+## Menu shortcuts
+
+One-key access to things Blender already does — a pie and menus covering
+modifiers, UV seams and sharp edges, asset marking, link/transfer data, origin
+modes, interaction modes, apply transform, shading, select by type, and
+isolate / swap / select / rename by collection.
 
 ---
 
