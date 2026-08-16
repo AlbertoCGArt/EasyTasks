@@ -1,0 +1,4 @@
+# Adds the Sponsor button to the repository header.
+# Gumroad and personal sites are not native GitHub funding platforms, so they
+# go in `custom`, which takes up to four URLs.
+custom: ["https://3dartstuff.com"]

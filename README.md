@@ -9,6 +9,10 @@ when you are done.
 
 **Blender 3.0 – 5.x** · GPL-3.0-or-later · by [Alberto Cordero](https://www.artstation.com/albertocordero)
 
+**Free and open source.** Use it, modify it, ship commercial work with it — no
+licence to buy and nothing held back. If it saves you time and you'd like to
+support the work, [3dartstuff.com](https://3dartstuff.com).
+
 ---
 
 ## Install
