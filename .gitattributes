@@ -1,0 +1,16 @@
+# Normalise to LF in the repository; check out native on Windows.
+* text=auto
+
+# Always LF — these are read by bash on the Linux CI runner.
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.sh    text eol=lf
+
+# Python stays LF everywhere so diffs match what Blender ships.
+*.py    text eol=lf
+
+# PowerShell is happiest with CRLF on Windows.
+*.ps1   text eol=crlf
+
+*.md    text
+*.zip   binary

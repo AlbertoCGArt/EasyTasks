@@ -1,0 +1,25 @@
+# Build artifacts — released as GitHub Release assets, not committed
+easy_tasks_*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Blender
+*.blend1
+*.blend2
+snapshots/
+
+# Local tooling config (machine-specific paths)
+.claude/settings.local.json
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
