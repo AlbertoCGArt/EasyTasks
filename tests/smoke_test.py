@@ -277,6 +277,168 @@ def scene_stats_cached():
 check("stats operators expose a cache", scene_stats_cached)
 
 
+def structure_tree_is_depth_first():
+    """
+    The Project Structure dialog used to draw every depth-2 collection after
+    BLOCKING, so LIGHTS/CAMERAS looked like children of BLOCKING instead of
+    STUDIO. Walk the same helper the dialog draws from and assert the order
+    is a real depth-first traversal.
+    """
+    children = et._structure_children()
+    order = []
+
+    def walk(parent, depth):
+        for index, name in children.get(parent, []):
+            order.append((name, depth, parent))
+            walk(name, depth + 1)
+
+    walk(None, 0)
+    names = [n for n, _d, _p in order]
+
+    assert names == ['PRODUCTION',
+                     'STUDIO', 'LIGHTS', 'CAMERAS',
+                     'MODULES', 'FLOOR', 'WALLS', 'CEILING', 'PROPS', 'DECALS',
+                     'BLOCKING'], names
+
+    depth_of = {n: d for n, d, _p in order}
+    parent_of = {n: p for n, _d, p in order}
+    assert depth_of['LIGHTS'] == 2 and parent_of['LIGHTS'] == 'STUDIO'
+    assert depth_of['FLOOR'] == 2 and parent_of['FLOOR'] == 'MODULES'
+    assert depth_of['BLOCKING'] == 1 and parent_of['BLOCKING'] == 'PRODUCTION'
+
+    # every collection must appear immediately after its parent's subtree start
+    for name, _depth, parent in order:
+        if parent is not None:
+            assert names.index(parent) < names.index(name), \
+                f"{name} drawn before its parent {parent}"
+
+check("project structure draws a real tree", structure_tree_is_depth_first)
+
+
+def organize_scene_builds_real_hierarchy():
+    for coll in list(bpy.data.collections):
+        bpy.data.collections.remove(coll)
+    # Removing a collection orphans its objects out of the view layer; put them
+    # back so the checks after this one still have something selectable.
+    for obj in bpy.data.objects:
+        if not obj.users_collection:
+            scene.collection.objects.link(obj)
+    bpy.ops.et.organize_scene('EXEC_DEFAULT')
+
+    def parent_of(name):
+        for coll in bpy.data.collections:
+            if name in coll.children:
+                return coll.name
+        return 'SCENE_ROOT' if name in scene.collection.children else None
+
+    for name, expected, _color in et.COLLECTION_STRUCTURE:
+        got = parent_of(name)
+        want = expected if expected is not None else 'SCENE_ROOT'
+        assert got == want, f"{name} parented to {got}, expected {want}"
+    notes.append("organize_scene hierarchy matches COLLECTION_STRUCTURE exactly")
+
+check("et.organize_scene nests collections correctly",
+      organize_scene_builds_real_hierarchy)
+
+
+def organize_scene_is_idempotent():
+    before = len(bpy.data.collections)
+    bpy.ops.et.organize_scene('EXEC_DEFAULT', use_colls=(True,) * 11)
+    assert len(bpy.data.collections) == before, \
+        "re-running created duplicate collections"
+
+check("et.organize_scene re-run creates nothing new", organize_scene_is_idempotent)
+
+
+def add_to_collection_move_and_link():
+    target = bpy.data.collections.new("CtxTarget")
+    scene.collection.children.link(target)
+
+    bpy.ops.object.select_all(action='DESELECT')
+    cube.select_set(True)
+    bpy.context.view_layer.objects.active = cube
+
+    scene.et_semantic.move = True
+    bpy.ops.et.add_to_collection('EXEC_DEFAULT', collection_name="CtxTarget")
+    assert [c.name for c in cube.users_collection] == ["CtxTarget"], \
+        [c.name for c in cube.users_collection]
+
+    other = bpy.data.collections.new("CtxOther")
+    scene.collection.children.link(other)
+    scene.et_semantic.move = False
+    bpy.ops.et.add_to_collection('EXEC_DEFAULT', collection_name="CtxOther")
+    names = sorted(c.name for c in cube.users_collection)
+    assert names == ["CtxOther", "CtxTarget"], names
+    scene.et_semantic.move = True
+
+check("et.add_to_collection honours move and link", add_to_collection_move_and_link)
+
+
+def add_to_collection_rejects_missing():
+    # An operator that reports {'ERROR'} surfaces as a RuntimeError in Python,
+    # so a clean rejection is the exception — not a {'CANCELLED'} return.
+    try:
+        bpy.ops.et.add_to_collection('EXEC_DEFAULT',
+                                     collection_name="DoesNotExist")
+    except RuntimeError as exc:
+        assert "not found" in str(exc), exc
+        return
+    raise AssertionError("a missing collection name was accepted")
+
+check("et.add_to_collection rejects a missing name", add_to_collection_rejects_missing)
+
+
+def new_collection_for_selection():
+    bpy.ops.object.select_all(action='DESELECT')
+    sphere.select_set(True)
+    bpy.context.view_layer.objects.active = sphere
+    bpy.ops.et.new_collection_for_selection(
+        'EXEC_DEFAULT', name="FreshGroup", parent="CtxTarget", color='COLOR_05')
+
+    coll = bpy.data.collections.get("FreshGroup")
+    assert coll is not None, "collection not created"
+    assert coll.color_tag == 'COLOR_05', coll.color_tag
+    assert sphere.name in coll.objects
+    assert "FreshGroup" in bpy.data.collections["CtxTarget"].children, \
+        "not nested under the requested parent"
+
+check("et.new_collection_for_selection creates + parents + tags",
+      new_collection_for_selection)
+
+
+def suggestion_matches_routing():
+    props = bpy.data.collections.get("PROPS") or bpy.data.collections.new("PROPS")
+    if not et._collection_is_linked(props, scene):
+        scene.collection.children.link(props)
+
+    probe = bpy.data.objects.new("Props_Barrel_01", bpy.data.meshes.new("BarrelM"))
+    scene.collection.objects.link(probe)
+    bpy.ops.object.select_all(action='DESELECT')
+    probe.select_set(True)
+    bpy.context.view_layer.objects.active = probe
+
+    suggested = et._suggested_collection(bpy.context)
+    assert suggested is not None and suggested.name == "PROPS", \
+        suggested.name if suggested else None
+
+    # once it is already there, there is nothing left to suggest
+    et._assign_to_collection([probe], props, True)
+    assert et._suggested_collection(bpy.context) is None, \
+        "suggested a collection the object is already in"
+    notes.append("context-menu suggestion reuses the Arrange Scene matcher")
+
+check("context menu suggests the routed collection", suggestion_matches_routing)
+
+
+def context_menu_hooks_installed():
+    assert et.draw_object_context_menu in \
+        bpy.types.VIEW3D_MT_object_context_menu._dyn_ui_initialize()
+    assert et.draw_object_context_menu in \
+        bpy.types.OUTLINER_MT_object._dyn_ui_initialize()
+
+check("right-click menu hooks are installed", context_menu_hooks_installed)
+
+
 def auto_route_handler():
     assert et._auto_route_new_objects in bpy.app.handlers.depsgraph_update_post
     # cheap-path guard: no crash when the handler runs against the live scene
