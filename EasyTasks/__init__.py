@@ -44,7 +44,7 @@ _route_pending  = False    # a routing timer is already queued
 # viewports can't clobber each other's saved shading.
 _shading_state  = {}       # {space_ptr: (mode, {prop: value})}
 
-# Face-stretch analyzer. Material *names* are stored, not ID pointers â€” holding
+# Face-stretch analyzer. Material *names* are stored, not ID pointers — holding
 # bpy IDs across an undo step can leave stale pointers behind.
 _stretch_state  = {}       # {obj_name: [material_name | None]}
 
@@ -83,7 +83,7 @@ _TYPE_COLLECTION = {'LIGHT': 'LIGHTS', 'CAMERA': 'CAMERAS'}
 def _build_route_index():
     """
     Build {keyword: Collection} once, so routing N objects costs O(N) name-token
-    lookups instead of O(N Ã— collections) string comparisons.
+    lookups instead of O(N × collections) string comparisons.
 
     Keys are the lowercased collection name plus its naive singular, so a
     collection 'ROCKS' matches an object named 'Rock_Pile_01'.
@@ -102,8 +102,8 @@ def _find_target_collection(obj, index=None):
     Return an existing bpy.data collection to route obj into, or None.
 
     Priority:
-      1. Object type  (LIGHT â†’ LIGHTS, CAMERA â†’ CAMERAS)
-      2. Hardcoded aliases  (cam â†’ CAMERAS, lamp â†’ LIGHTS, ceil â†’ CEILING)
+      1. Object type  (LIGHT → LIGHTS, CAMERA → CAMERAS)
+      2. Hardcoded aliases  (cam → CAMERAS, lamp → LIGHTS, ceil → CEILING)
       3. Any existing collection matched by name / simple singular
 
     Pass a prebuilt `index` from _build_route_index() when routing in bulk.
@@ -146,7 +146,7 @@ def _find_layer_collection(root_lc, coll):
 
 
 # ---------------------------------------------------------------------------
-# Auto-route handler â€” silently moves newly added objects to matching
+# Auto-route handler — silently moves newly added objects to matching
 # collections without the user having to run Arrange Scene manually.
 # ---------------------------------------------------------------------------
 
@@ -160,7 +160,7 @@ def _prefs():
 
 @bpy.app.handlers.persistent
 def _auto_route_new_objects(scene, depsgraph):
-    # This fires on *every* depsgraph update â€” dragging a vertex, scrubbing the
+    # This fires on *every* depsgraph update — dragging a vertex, scrubbing the
     # timeline, every click. It must stay near-free in the common case, so the
     # first gate is an integer compare and nothing else.
     global _route_pending
@@ -345,7 +345,7 @@ class ET_OT_ApplyModifiers(bpy.types.Operator):
         obj = context.active_object
         if obj.data is not None and obj.data.users > 1:
             self.report({'ERROR'},
-                        f"'{obj.name}' has multi-user data â€” make it single-user first")
+                        f"'{obj.name}' has multi-user data — make it single-user first")
             return {'CANCELLED'}
 
         applied = 0
@@ -682,7 +682,7 @@ class ET_OT_OrganizeScene(bpy.types.Operator):
 
     # One flag per entry in COLLECTION_STRUCTURE, indexed the same way. This
     # replaces eleven hand-written BoolProperties plus a hand-written draw tree
-    # and a hand-written selections dict â€” three places that all had to agree
+    # and a hand-written selections dict — three places that all had to agree
     # about the hierarchy, and did not: the dialog drew every depth-2 collection
     # after BLOCKING, so LIGHTS and CAMERAS appeared to be children of BLOCKING
     # rather than of STUDIO.
@@ -879,7 +879,7 @@ class ET_OT_IsolateCollection(bpy.types.Operator):
             _isolation_state = {lc.name: lc.hide_viewport for lc in top_level}
             for lc in top_level:
                 lc.hide_viewport = not contains_any(lc, obj_colls)
-            self.report({'INFO'}, "Collection isolated â€” run again to restore")
+            self.report({'INFO'}, "Collection isolated — run again to restore")
 
         return {"FINISHED"}
 
@@ -944,7 +944,7 @@ class ET_OT_CollectionColorSync(bpy.types.Operator):
 #
 # Complements Arrange Scene rather than replacing it. Arrange Scene sorts the
 # whole scene automatically by object type and name; this assigns whatever is
-# *selected* to a category the user names by hand â€” select the floor meshes,
+# *selected* to a category the user names by hand — select the floor meshes,
 # pick Floor, hit Add. The collection is created on first use and reused after.
 # ---------------------------------------------------------------------------
 
@@ -997,7 +997,7 @@ def _semantic_collection_name(scene, label):
         name = settings.pattern.format(category=label,
                                        project=_project_name(scene))
     except (KeyError, IndexError, ValueError):
-        # Unknown token in the pattern â€” fall back rather than raising in draw().
+        # Unknown token in the pattern — fall back rather than raising in draw().
         name = f"{label}_{_project_name(scene)}"
     return name.strip() or label
 
@@ -1154,9 +1154,6 @@ class ET_SemanticSettings(bpy.types.PropertyGroup):
         ],
         default='PRESET')
 
-    target_collection: bpy.props.StringProperty(
-        name="Collection",
-        description="Collection to assign the selection to")
 
     move: bpy.props.BoolProperty(
         name="Move (unlink from others)", default=True,
@@ -1208,7 +1205,7 @@ class ET_OT_AssignSemantic(bpy.types.Operator):
         patterned = _semantic_collection_name(scene, label)
 
         # Resolution order matters. Reusing what the project already has beats
-        # inventing a new collection beside it â€” clicking Floor should drop the
+        # inventing a new collection beside it — clicking Floor should drop the
         # selection into PRODUCTION > MODULES > FLOOR, not create Floor_<project>
         # at the scene root next to it.
         coll = _find_in_project(scene, label, patterned)
@@ -1231,7 +1228,7 @@ class ET_OT_AssignSemantic(bpy.types.Operator):
                                          settings.move)
 
         verb = "Created" if created else "Added to"
-        self.report({'INFO'}, f"{verb} '{coll.name}' â€” {assigned} object(s)")
+        self.report({'INFO'}, f"{verb} '{coll.name}' — {assigned} object(s)")
         return {"FINISHED"}
 
 
@@ -1275,7 +1272,7 @@ class ET_OT_PickQuickSlots(bpy.types.Operator):
                      icon='OUTLINER_COLLECTION')
 
         if not slots:
-            layout.label(text="Nothing found â€” is the root empty?", icon='INFO')
+            layout.label(text="Nothing found — is the root empty?", icon='INFO')
             return
 
         col = layout.column(align=True)
@@ -1324,27 +1321,22 @@ def draw_semantic_assign(layout, context):
     # --- project root ------------------------------------------------------
     row = box.row(align=True)
     row.prop_search(settings, 'project_root', bpy.data, 'collections',
-                    text="", icon='OUTLINER_COLLECTION')
+                    text="Project", icon='OUTLINER_COLLECTION')
     row.operator('et.scan_project', text="", icon='FILE_REFRESH')
 
     if root is None:
-        box.label(text="Set a project collection to use its hierarchy",
-                  icon='INFO')
+        box.label(text="Pick a project root to use its hierarchy", icon='INFO')
 
     use_project = settings.source == 'PROJECT' and root is not None
 
     # --- target + add ------------------------------------------------------
+    # In project mode there is deliberately no second collection field here.
+    # It duplicated the root picker directly above it, and the two were
+    # independent, so it was ambiguous whether Add Selection followed the root
+    # or that field. The Quick Assign buttons below are the whole interface:
+    # pick the root once, then one click per assignment.
     col = box.column(align=True)
-    if use_project:
-        col.prop_search(settings, 'target_collection', bpy.data, 'collections',
-                        text="")
-        target = settings.target_collection.strip()
-        row = col.row(align=True)
-        row.scale_y = 1.3
-        row.enabled = bool(target)
-        row.operator('et.add_to_collection', text='Add Selection',
-                     icon='ADD').collection_name = target
-    else:
+    if not use_project:
         if settings.use_custom:
             col.prop(settings, 'custom_category', text='',
                      icon='OUTLINER_COLLECTION')
@@ -1354,7 +1346,7 @@ def draw_semantic_assign(layout, context):
             label = _SEMANTIC_LOOKUP[settings.category][0]
 
         # Show where this will actually land, so it is never a guess at the
-        # moment of clicking â€” an existing collection when one matches, or the
+        # moment of clicking — an existing collection when one matches, or the
         # pattern-built name when a new one has to be created.
         existing = _find_in_project(scene, label,
                                     _semantic_collection_name(scene, label))
@@ -1380,17 +1372,32 @@ def draw_semantic_assign(layout, context):
     if use_project:
         slots = [s for s in scene.et_quick_slots if s.use]
         if not slots:
-            box.label(text="No collections picked â€” use the tick icon",
+            box.label(text="No collections picked — use the tick icon",
                       icon='INFO')
         else:
-            grid = box.grid_flow(row_major=True, columns=3, align=True)
+            # Two columns, not three: collection names here are the user's own
+            # and can be long, so a third column truncates them to "MODU…".
+            # The presets below keep three because those names are short and fixed.
+            grid = box.grid_flow(row_major=True, columns=2, align=True)
+            missing = 0
             for slot in slots:
-                coll = bpy.data.collections.get(slot.name)
-                if coll is None:
+                if bpy.data.collections.get(slot.name) is None:
+                    # Deleted or renamed since the last scan.
+                    missing += 1
                     continue
                 grid.operator('et.add_to_collection', text=slot.name,
                               icon='OUTLINER_COLLECTION'
                               ).collection_name = slot.name
+            if missing:
+                box.label(text=f"{missing} collection(s) gone — rescan",
+                          icon='ERROR')
+
+        # Anything not on a button is still one click away, without a second
+        # always-visible field competing with the root picker.
+        row = box.row(align=True)
+        row.operator('et.add_to_collection', text="Other…",
+                     icon='VIEWZOOM').collection_name = ""
+        row.operator('et.new_collection_for_selection', text="New…", icon='ADD')
     else:
         grid = box.grid_flow(row_major=True, columns=3, align=True)
         for key, cat_label, icon, _color in SEMANTIC_CATEGORIES:
@@ -1414,7 +1421,7 @@ def draw_semantic_assign(layout, context):
 
 
 # ---------------------------------------------------------------------------
-# Right-click â–¸ Add to Collection
+# Right-click ▸ Add to Collection
 #
 # Blender's own Move/Link to Collection (M / Shift+M) is a bare hierarchy
 # browser. This adds the thing it cannot do: it looks at what you selected and
@@ -1441,7 +1448,7 @@ def _suggested_collection(context):
     if target is None:
         return None
     # Pointless to suggest the collection everything is already in.
-    # users_collection holds Collection objects, not names â€” comparing against
+    # users_collection holds Collection objects, not names — comparing against
     # target.name here silently never matched.
     if all(target in o.users_collection for o in context.selected_objects):
         return None
@@ -1463,7 +1470,7 @@ class ET_OT_AddToCollection(bpy.types.Operator):
 
     def invoke(self, context, event):
         # Called from a menu entry with a name -> act immediately.
-        # Called as "Search allâ€¦" with no name -> offer the search field.
+        # Called as "Search all…" with no name -> offer the search field.
         if self.collection_name:
             return self.execute(context)
         return context.window_manager.invoke_props_dialog(self, width=300)
@@ -1544,7 +1551,7 @@ class ET_OT_NewCollectionForSelection(bpy.types.Operator):
 
         self.report({'INFO'},
                     f"{'Created' if created else 'Reused'} '{coll.name}' "
-                    f"â€” {count} object(s)")
+                    f"— {count} object(s)")
         return {"FINISHED"}
 
 
@@ -1568,7 +1575,7 @@ class ET_MT_AddToCollectionMenu(bpy.types.Menu):
             layout.separator()
 
         layout.operator('et.new_collection_for_selection',
-                        text="New Collectionâ€¦", icon='ADD')
+                        text="New Collection…", icon='ADD')
         layout.menu('ET_MT_semantic_menu', text="By Category", icon='PRESET')
         layout.separator()
 
@@ -1584,12 +1591,12 @@ class ET_MT_AddToCollectionMenu(bpy.types.Menu):
                             icon='OUTLINER_COLLECTION'
                             ).collection_name = coll.name
 
-        # Never silently truncate â€” say how many are hidden and offer search.
+        # Never silently truncate — say how many are hidden and offer search.
         hidden = len(collections) - _MENU_COLLECTION_LIMIT
         if hidden > 0:
             layout.separator()
             layout.operator('et.add_to_collection',
-                            text=f"Search allâ€¦ (+{hidden} more)",
+                            text=f"Search all… (+{hidden} more)",
                             icon='VIEWZOOM').collection_name = ""
 
 
@@ -1649,7 +1656,7 @@ class ET_OT_VisibilityBookmark(bpy.types.Operator):
             box = layout.box()
             box.label(text="Saved slots:", icon='CHECKMARK')
             for name in _vis_bookmarks:
-                box.label(text=f"  â€¢ {name}")
+                box.label(text=f"  • {name}")
 
     def execute(self, context):
         root_lc = context.view_layer.layer_collection
@@ -1682,7 +1689,7 @@ class ET_OT_RenameByCollection(bpy.types.Operator):
     bl_idname  = "et.rename_by_collection"
     bl_label   = "Rename by Collection"
     bl_description = (
-        "Rename selected objects to CollectionName_01, _02 â€¦ "
+        "Rename selected objects to CollectionName_01, _02 … "
         "grouped by their first collection"
     )
     bl_options = {"REGISTER", "UNDO"}
@@ -1811,7 +1818,7 @@ class ET_OT_CollectionStats(bpy.types.Operator):
     bl_description = "Show face and object counts per collection"
     bl_options = {"REGISTER"}
 
-    # draw() runs on every redraw of the popup â€” once per mouse move. Counting
+    # draw() runs on every redraw of the popup — once per mouse move. Counting
     # polygons there re-walked the whole scene each frame, so the numbers are
     # gathered once in invoke() and the draw just formats them.
     _rows  = []
@@ -1901,10 +1908,10 @@ class ET_OT_SceneStats(bpy.types.Operator):
         box = self.layout.box()
         box.label(text="Scene Statistics", icon='INFO')
         col = box.column(align=True)
-        col.label(text=f"Objects   â€”  Selection: {s['sel_objs']:>6}    Scene: {s['all_objs']}")
-        col.label(text=f"Faces     â€”  Selection: {s['sel_faces']:>6,}    Scene: {s['all_faces']:,}")
-        col.label(text=f"Vertices  â€”  Selection: {s['sel_verts']:>6,}    Scene: {s['all_verts']:,}")
-        col.label(text=f"Materials â€”  Selection: {s['sel_mats']:>6}    Scene: {s['all_mats']}")
+        col.label(text=f"Objects   —  Selection: {s['sel_objs']:>6}    Scene: {s['all_objs']}")
+        col.label(text=f"Faces     —  Selection: {s['sel_faces']:>6,}    Scene: {s['all_faces']:,}")
+        col.label(text=f"Vertices  —  Selection: {s['sel_verts']:>6,}    Scene: {s['all_verts']:,}")
+        col.label(text=f"Materials —  Selection: {s['sel_mats']:>6}    Scene: {s['all_mats']}")
 
 
 # ---------------------------------------------------------------------------
@@ -1914,7 +1921,7 @@ class ET_OT_SceneStats(bpy.types.Operator):
 class ET_OT_ConsolidateMaterials(bpy.types.Operator):
     bl_idname  = "et.consolidate_materials"
     bl_label   = "Consolidate Materials"
-    bl_description = "Merge duplicate materials (Mat.001, Mat.002 â†’ Mat) and optionally remove unused"
+    bl_description = "Merge duplicate materials (Mat.001, Mat.002 → Mat) and optionally remove unused"
     bl_options = {"REGISTER", "UNDO"}
 
     remove_unused: bpy.props.BoolProperty(name="Remove Unused After Merge", default=True)
@@ -1950,7 +1957,7 @@ class ET_OT_ConsolidateMaterials(bpy.types.Operator):
             if base is None:
                 if not self.rename_orphans:
                     continue
-                # No original left â€” promote the first copy so the rest still merge.
+                # No original left — promote the first copy so the rest still merge.
                 base = copies.pop(0)
                 base.name = base_name
 
@@ -2096,9 +2103,9 @@ class ET_OT_OriginToBase(bpy.types.Operator):
 
         msg = f"Origin to base on {moved} object(s)"
         if shared:
-            msg += f" â€” {shared} skipped (multi-user data)"
+            msg += f" — {shared} skipped (multi-user data)"
         if skipped:
-            msg += f" â€” {skipped} unsupported"
+            msg += f" — {skipped} unsupported"
         self.report({'INFO'} if moved else {'WARNING'}, msg)
         return {"FINISHED"}
 
@@ -2227,7 +2234,7 @@ class ET_OT_SelectByType(bpy.types.Operator):
 
     def execute(self, context):
         # Selecting directly instead of temporarily rewriting context.area.type
-        # to run bpy.ops.object.select_by_type â€” that swap redraws the editor
+        # to run bpy.ops.object.select_by_type — that swap redraws the editor
         # under the user and is not a supported way to build an operator context.
         view_layer = context.view_layer
         count = 0
@@ -2415,8 +2422,8 @@ class ET_OT_SilhouetteCheck(bpy.types.Operator):
             'show_cavity':  False,
         })
         self.report({'INFO'},
-                    "Silhouette on â€” click again to restore" if on
-                    else "Silhouette off â€” shading restored")
+                    "Silhouette on — click again to restore" if on
+                    else "Silhouette off — shading restored")
         return {"FINISHED"}
 
 
@@ -2445,8 +2452,8 @@ class ET_OT_CavityPreview(bpy.types.Operator):
             'cavity_valley_factor': 2.5,
         })
         self.report({'INFO'},
-                    "Cavity preview on â€” click again to restore" if on
-                    else "Cavity preview off â€” shading restored")
+                    "Cavity preview on — click again to restore" if on
+                    else "Cavity preview off — shading restored")
         return {"FINISHED"}
 
 
@@ -2462,7 +2469,7 @@ class ET_OT_FaceStretchAnalyzer(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         # While the analyzer is on it must stay clickable even with nothing
-        # selected â€” otherwise deselecting traps the user with the analyzer
+        # selected — otherwise deselecting traps the user with the analyzer
         # material still assigned and no way to switch it back off.
         if _stretch_state:
             return True
@@ -2522,11 +2529,11 @@ class ET_OT_FaceStretchAnalyzer(bpy.types.Operator):
         rgb = np.empty((n_polys, 3), dtype=np.float64)
 
         compressed = t <= 1.0
-        # blue â†’ green: UV island larger than the 3D face
+        # blue → green: UV island larger than the 3D face
         rgb[compressed, 0] = 0.0
         rgb[compressed, 1] = t[compressed]
         rgb[compressed, 2] = 1.0 - t[compressed]
-        # green â†’ red: 3D face larger than the UV island
+        # green → red: 3D face larger than the UV island
         stretched = ~compressed
         f = np.minimum(t[stretched] - 1.0, 1.0)
         rgb[stretched, 0] = f
@@ -2583,7 +2590,7 @@ class ET_OT_FaceStretchAnalyzer(bpy.types.Operator):
 
         Restoring used to iterate context.selected_objects, so changing the
         selection while the analyzer was on wiped the material slots of any
-        object that had scrolled out of the selection â€” and cleared the state
+        object that had scrolled out of the selection — and cleared the state
         dict anyway, making the loss permanent.
         """
         restored = 0
@@ -2608,7 +2615,7 @@ class ET_OT_FaceStretchAnalyzer(bpy.types.Operator):
     def execute(self, context):
         if _stretch_state:
             restored = self._restore()
-            self.report({'INFO'}, f"Face stretch off â€” restored {restored} object(s)")
+            self.report({'INFO'}, f"Face stretch off — restored {restored} object(s)")
             return {"FINISHED"}
 
         mat     = self._build_mat()
@@ -2643,7 +2650,7 @@ class ET_OT_FaceStretchAnalyzer(bpy.types.Operator):
             self.report({'WARNING'}, "No selected mesh has usable UVs")
             return {'CANCELLED'}
 
-        msg = f"Face stretch on for {shown} mesh(es) â€” blue=compressed, green=ok, red=stretched"
+        msg = f"Face stretch on for {shown} mesh(es) — blue=compressed, green=ok, red=stretched"
         if skipped:
             msg += f" ({skipped} skipped, no UV)"
         self.report({'INFO'}, msg)
@@ -2841,7 +2848,7 @@ class ET_MT_EasyTasksPie(bpy.types.Menu):
     def draw(self, context):
         pie = self.layout.menu_pie()
 
-        # Slot 1 â€“ left: Overlay (largest box â€” left slot has the most outward room)
+        # Slot 1 – left: Overlay (largest box — left slot has the most outward room)
         # spaces[0] is only a View3D when the pie is opened over a 3D viewport;
         # from any other editor the overlay/shading lookups raise and the whole
         # pie fails to draw.
@@ -2858,8 +2865,8 @@ class ET_MT_EasyTasksPie(bpy.types.Menu):
         else:
             box.label(text='Open over a 3D viewport', icon='INFO')
 
-        # Slot 2 â€“ right: Collections + Select by Type
-        # (no diagonal slots â€” all 4 cardinals hold boxes so diagonals always clip)
+        # Slot 2 – right: Collections + Select by Type
+        # (no diagonal slots — all 4 cardinals hold boxes so diagonals always clip)
         box = pie.box()
         col = box.column(align=True)
         col.label(text="Collections", icon='OUTLINER_COLLECTION')
@@ -2870,7 +2877,7 @@ class ET_MT_EasyTasksPie(bpy.types.Menu):
         col.separator()
         col.menu('ET_MT_select_menu', text='Select by Type', icon='RESTRICT_SELECT_OFF')
 
-        # Slot 3 â€“ bottom: Apply Transform + Shading combined
+        # Slot 3 – bottom: Apply Transform + Shading combined
         box = pie.box()
         col = box.column(align=True)
         col.label(text="Apply Transform", icon='OBJECT_DATA')
@@ -2882,7 +2889,7 @@ class ET_MT_EasyTasksPie(bpy.types.Menu):
         col.operator('object.shade_smooth', text='Shade Smooth', icon='MESH_CIRCLE')
         col.operator('object.shade_flat',   text='Shade Flat',   icon='MESH_PLANE')
 
-        # Slot 4 â€“ top: Setup
+        # Slot 4 – top: Setup
         box = pie.box()
         col = box.column(align=True)
         col.label(text="Setup", icon='OUTLINER_COLLECTION')
@@ -2897,8 +2904,8 @@ class ET_MT_EasyTasksPie(bpy.types.Menu):
 class ET_AddonPreferences(bpy.types.AddonPreferences):
     # Must match the module this addon is registered under. It was hardcoded to
     # 'easy_tasks' while the package installs as 'EasyTasks', so Blender never
-    # matched the preferences to the addon and this whole panel â€” including the
-    # three shortcut rebinding fields â€” never appeared.
+    # matched the preferences to the addon and this whole panel — including the
+    # three shortcut rebinding fields — never appeared.
     bl_idname = __name__
 
     auto_route: bpy.props.BoolProperty(
@@ -3038,15 +3045,15 @@ class ET_PT_AnalysisPanel(bpy.types.Panel):
         cavity_on  = preview == 'CAVITY'
         stretch_on = bool(_stretch_state)
         col.operator('et.silhouette_check',
-                     text='Silhouette  â—  ON' if sil_on else 'Silhouette Check',
+                     text='Silhouette  ●  ON' if sil_on else 'Silhouette Check',
                      icon='SHADING_SOLID',
                      depress=sil_on)
         col.operator('et.cavity_preview',
-                     text='Cavity  â—  ON' if cavity_on else 'Cavity Preview',
+                     text='Cavity  ●  ON' if cavity_on else 'Cavity Preview',
                      icon='SHADING_RENDERED',
                      depress=cavity_on)
         col.operator('et.face_stretch_analyzer',
-                     text='Face Stretch  â—  ON' if stretch_on else 'Face Stretch',
+                     text='Face Stretch  ●  ON' if stretch_on else 'Face Stretch',
                      icon='MOD_UVPROJECT',
                      depress=stretch_on)
 
@@ -3074,7 +3081,7 @@ classes = (
     ET_OT_PickQuickSlots,
     ET_OT_SetAllQuickSlots,
     ET_MT_SemanticMenu,
-    # Right-click â–¸ Add to Collection
+    # Right-click ▸ Add to Collection
     ET_OT_AddToCollection,
     ET_OT_NewCollectionForSelection,
     ET_MT_AddToCollectionMenu,
@@ -3133,7 +3140,7 @@ classes = (
 # (addon_keymaps key, keymap name, space_type, operator, key, modifiers, menu)
 # Bound in the '3D View' keymap rather than 'Window'/EMPTY: the old scope made
 # Q and Ctrl+Shift+X global, so they fired in the shader editor, the outliner,
-# the video sequencer â€” every editor in Blender.
+# the video sequencer — every editor in Blender.
 _KEYMAP_SPEC = (
     ('easy_tasks_pie',       'wm.call_menu_pie', 'X', {'ctrl': True, 'shift': True},
      'ET_MT_easy_tasks_pie'),

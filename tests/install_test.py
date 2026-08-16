@@ -1,5 +1,5 @@
 """Install the built zip the way a user would, then prove the preferences
-block actually resolves â€” that was the bl_idname bug.
+block actually resolves — that was the bl_idname bug.
 
 Run with:
   blender --background --factory-startup --python install_test.py
