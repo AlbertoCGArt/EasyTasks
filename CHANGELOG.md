@@ -2,6 +2,55 @@
 
 All notable changes to Easy Tasks are recorded here.
 
+## [2.4.0]
+
+### Added
+- **Project root collection.** Point Assign to Category at a root collection and
+  it works with the hierarchy that is already there. Categories resolve to
+  collections inside it, Quick Assign is built from what it actually contains,
+  and a picker chooses which of those appear as buttons. Clearing the root falls
+  back to the preset categories.
+- **Right-click ▸ Add to Collection** in the 3D viewport and the outliner. It
+  suggests a destination using the same matcher Arrange Scene uses, lists
+  existing collections with object counts, creates new ones with a parent and
+  colour tag, and offers a search field past twenty collections instead of
+  truncating the menu.
+- `tests/redundancy_test.py` — static audit that fails if a button is drawn
+  twice on the sidebar, if a container repeats an entry, or if an operator or
+  menu is registered but reachable from no UI and no keymap.
+
+### Fixed
+- **Quick Assign created a duplicate collection instead of using the project's
+  own.** With `PRODUCTION > MODULES > FLOOR` already built, clicking Floor made
+  a new `Floor_<project>` at the scene root beside it. Categories now resolve to
+  an existing collection under the project root first.
+- **The Project Structure dialog drew the wrong hierarchy.** It laid the tree out
+  flat by depth rather than depth-first, so LIGHTS and CAMERAS rendered below
+  BLOCKING and appeared to be its children instead of STUDIO's, and FLOOR–DECALS
+  appeared under those rather than under MODULES. Both `draw()` and `execute()`
+  now walk `COLLECTION_STRUCTURE`, replacing eleven hand-written BoolProperties
+  and a duplicated selections dict with one indexed BoolVectorProperty.
+- Collection Stats was drawn in both the Scene and Analysis panels, which share
+  the EasyTasks tab, so it appeared twice on screen at once. It now lives only
+  in Analysis, beside Scene Stats.
+- The context-menu suggestion compared a collection name against a list of
+  collection objects, so it never recognised that the selection was already in
+  the collection it was suggesting.
+
+### Removed
+- `ET_OT_Convert` — registered but present in no menu or panel, and a bare
+  passthrough to `bpy.ops.object.convert` since the context workaround was
+  dropped.
+- `ET_MT_SceneMenu` and `ET_MT_MeshMenu` — orphaned when the pie was rewritten to
+  use boxes; nothing referenced them, and they were the only route to
+  `ET_MT_OrganizeMenu` and `ET_MT_AnalysisMenu`, which FavTools now points at
+  directly instead of inlining the same eleven rows.
+
+### Changed
+- The sidebar's Organize box gained Isolate Collection, Swap Collections and
+  Rename by Collection, which were previously reachable only from the pie and
+  FavTools.
+
 ## [2.3.0]
 
 ### Added

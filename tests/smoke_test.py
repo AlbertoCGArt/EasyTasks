@@ -1,4 +1,4 @@
-﻿"""Headless smoke test for the Easy Tasks addon.
+"""Headless smoke test for the Easy Tasks addon.
 
 Loads the module as a package named 'EasyTasks' (matching how the zip installs),
 registers it, exercises the operators that can run without a UI, and unregisters.
@@ -437,6 +437,104 @@ def context_menu_hooks_installed():
         bpy.types.OUTLINER_MT_object._dyn_ui_initialize()
 
 check("right-click menu hooks are installed", context_menu_hooks_installed)
+
+
+def project_root_reuses_existing_hierarchy():
+    """
+    The reported bug: with PRODUCTION > MODULES > FLOOR already built by
+    Project Structure, clicking Floor made a *new* Floor_<project> at the scene
+    root instead of using the FLOOR that was already there.
+    """
+    for coll in list(bpy.data.collections):
+        bpy.data.collections.remove(coll)
+    for obj in bpy.data.objects:
+        if not obj.users_collection:
+            scene.collection.objects.link(obj)
+    bpy.ops.et.organize_scene('EXEC_DEFAULT')
+
+    st = scene.et_semantic
+    st.project_root = "PRODUCTION"
+    st.move = True
+
+    before = len(bpy.data.collections)
+    bpy.ops.object.select_all(action='DESELECT')
+    cube.select_set(True)
+    bpy.context.view_layer.objects.active = cube
+    bpy.ops.et.assign_semantic(category='FLOOR')
+
+    assert len(bpy.data.collections) == before, \
+        "a new collection was created instead of reusing FLOOR"
+    floor = bpy.data.collections["FLOOR"]
+    assert cube.name in floor.objects, "object did not land in the existing FLOOR"
+    assert bpy.data.collections.get(f"Floor_{scene.name}") is None, \
+        "the pattern-named collection was created anyway"
+
+    # and FLOOR is still nested where Project Structure put it
+    assert "FLOOR" in bpy.data.collections["MODULES"].children, \
+        "FLOOR was re-parented out of MODULES"
+    notes.append("category resolves into PRODUCTION > MODULES > FLOOR, no new collection")
+
+check("project root reuses the existing hierarchy",
+      project_root_reuses_existing_hierarchy)
+
+
+def quick_slots_detect_hierarchy():
+    scene.et_semantic.project_root = "PRODUCTION"
+    bpy.ops.et.scan_project()
+
+    found = [s.name for s in scene.et_quick_slots]
+    for expected in ('STUDIO', 'LIGHTS', 'CAMERAS', 'MODULES',
+                     'FLOOR', 'WALLS', 'CEILING', 'PROPS', 'DECALS', 'BLOCKING'):
+        assert expected in found, f"{expected} not detected — got {found}"
+    assert 'PRODUCTION' not in found, "the root listed itself as a slot"
+    assert scene.et_semantic.source == 'PROJECT', \
+        "picking a root did not switch Quick Assign to project mode"
+
+    depths = {s.name: s.depth for s in scene.et_quick_slots}
+    assert depths['STUDIO'] == 0 and depths['LIGHTS'] == 1, depths
+    notes.append(f"detected {len(found)} collections under PRODUCTION")
+
+check("quick slots detect the project hierarchy", quick_slots_detect_hierarchy)
+
+
+def quick_slot_selection_round_trips():
+    for slot in scene.et_quick_slots:
+        slot.use = (slot.name == 'WALLS')
+    # rescanning must not wipe the user's picks
+    bpy.ops.et.scan_project()
+    used = [s.name for s in scene.et_quick_slots if s.use]
+    assert used == ['WALLS'], used
+
+    bpy.ops.et.set_all_quick_slots(state=True)
+    assert all(s.use for s in scene.et_quick_slots)
+
+check("quick slot picks survive a rescan", quick_slot_selection_round_trips)
+
+
+def quick_assign_targets_existing_collection():
+    walls = bpy.data.collections["WALLS"]
+    bpy.ops.object.select_all(action='DESELECT')
+    sphere.select_set(True)
+    bpy.context.view_layer.objects.active = sphere
+
+    before = len(bpy.data.collections)
+    bpy.ops.et.add_to_collection('EXEC_DEFAULT', collection_name="WALLS")
+    assert len(bpy.data.collections) == before, "quick assign created a collection"
+    assert sphere.name in walls.objects
+    assert [c.name for c in sphere.users_collection] == ["WALLS"], \
+        [c.name for c in sphere.users_collection]
+
+check("quick assign puts objects in the detected collection",
+      quick_assign_targets_existing_collection)
+
+
+def unset_project_root_falls_back():
+    scene.et_semantic.project_root = ""
+    assert scene.et_semantic.source == 'PRESET', \
+        "clearing the root should fall back to presets"
+    assert len(scene.et_quick_slots) == 0, "slots not cleared"
+
+check("clearing the project root falls back to presets", unset_project_root_falls_back)
 
 
 def auto_route_handler():
