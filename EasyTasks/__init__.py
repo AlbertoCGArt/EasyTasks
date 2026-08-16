@@ -14,13 +14,13 @@
 bl_info = {
     "name": "Easy Tasks",
     "author": "Alberto Cordero",
-    "description": "A collection of Easy access Tools.",
+    "description": "Scene organisation, mesh cleanup and modelling analysis tools.",
     "blender": (3, 0, 0),
     "version": (2, 4, 0),
-    "location": "",
+    "location": "View3D > Sidebar > EasyTasks, Ctrl+Shift+X, Q",
     "warning": "",
-    "doc_url": "https://www.artstation.com/albertocordero",
-    "tracker_url": "",
+    "doc_url": "https://github.com/AlbertoCGArt/EasyTasks",
+    "tracker_url": "https://github.com/AlbertoCGArt/EasyTasks/issues",
     "category": "3D View",
 }
 
