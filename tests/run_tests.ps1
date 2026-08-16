@@ -37,11 +37,26 @@ foreach ($exe in $Blender) {
         if (-not (Test-Path $path)) { continue }
 
         Write-Host "`n--- $script  @  $exe ---" -ForegroundColor Cyan
-        $output = & $exe --background --factory-startup --python $path 2>&1
+
+        # Do NOT redirect stderr here. Blender writes harmless notices (TBBmalloc,
+        # GPU backend) to stderr, and PowerShell 5.1 wraps native stderr lines in
+        # ErrorRecords — which, under ErrorActionPreference='Stop', aborts the run
+        # even though Blender exited 0. Results are on stdout.
+        $previous = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $output = & $exe --background --factory-startup --python $path
+        }
+        finally {
+            $ErrorActionPreference = $previous
+        }
+
         $output | Select-String -Pattern 'PASS|FAIL|RESULT|old .* new ' |
             ForEach-Object { $_.Line }
 
-        if ($output -match 'RESULT: .*FAILURE') { $failed += "$script @ $exe" }
+        if ($output -match 'RESULT: .*FAILURE' -or $LASTEXITCODE -ne 0) {
+            $failed += "$script @ $exe"
+        }
     }
 }
 
