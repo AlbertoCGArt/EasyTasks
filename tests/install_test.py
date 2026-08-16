@@ -1,4 +1,4 @@
-﻿"""Install the built zip the way a user would, then prove the preferences
+"""Install the built zip the way a user would, then prove the preferences
 block actually resolves â€” that was the bl_idname bug.
 
 Run with:
@@ -10,7 +10,7 @@ _ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 import sys
 import bpy
 
-ZIP = _os.path.join(_ROOT, "easy_tasks_2.3.0.zip")
+ZIP = _os.path.join(_ROOT, "easy_tasks_2.4.0.zip")
 MODULE = "EasyTasks"
 
 failures = []

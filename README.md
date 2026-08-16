@@ -60,17 +60,33 @@ bound in the 3D View keymap, so they do not shadow keys in other editors.
 
 ### Assign to Category
 Selection-driven scene organisation. Select the floor meshes, pick **Floor**,
-hit **Add** — they move into a collection named from your pattern
-(`Floor_MyProject` by default), created on first use and reused after.
+hit **Add** — they go straight into the right collection.
 
-- 11 presets — Floor, Walls, Ceiling, Props, Decals, Trim, Modular, FX, Lights,
-  Cameras, Blocking — plus free-text custom categories.
-- Naming pattern is yours: `{category}` and `{project}` tokens, with `{project}`
-  read from the blend file name, the scene name, or a value you type.
+Point it at a **project root collection** and it works with the hierarchy you
+already have: categories resolve to collections that exist inside that root, so
+clicking Floor drops the selection into `PRODUCTION ▸ MODULES ▸ FLOOR` rather
+than inventing a `Floor_MyProject` beside it. Quick Assign is rebuilt from the
+collections actually found under the root, and a picker chooses which of them
+get a button.
+
+With no project root set it falls back to 11 presets — Floor, Walls, Ceiling,
+Props, Decals, Trim, Modular, FX, Lights, Cameras, Blocking — plus free-text
+custom categories, naming new collections from a `{category}` / `{project}`
+pattern you control, with `{project}` read from the blend file name, the scene
+name, or a value you type.
+
 - **Move** or **link** — take objects out of their old collections, or leave
   them in both.
-- Colour tags applied automatically, so **Color Sync** picks them up.
-- The resolved collection name is previewed in the panel before you click.
+- Colour tags applied to collections that don't already have one, so **Color
+  Sync** picks them up without overwriting your own choices.
+- The destination is shown in the panel before you click, marked `(existing)`
+  when it resolves to a collection you already have.
+
+### Right-click ▸ Add to Collection
+In the 3D viewport and the outliner. Suggests a destination for the selection
+using the same matcher **Arrange Scene** uses, lists existing collections with
+object counts, creates new ones with a parent and colour tag, and offers a
+search field past twenty collections instead of truncating the menu.
 
 ### Scene organisation
 - **Project Structure** — build a PRODUCTION ▸ STUDIO / MODULES / BLOCKING
@@ -115,6 +131,7 @@ Tests run headlessly in real Blender — no mocking:
 | `smoke_test.py` | Registration, operator behaviour, regression cases |
 | `icon_test.py` | Every icon name, settings property and operator id the UI references |
 | `install_test.py` | Installs the built zip and checks preferences resolve |
+| `redundancy_test.py` | Fails on a button drawn twice in the sidebar, or an operator/menu no UI can reach |
 | `bench.py` | Old vs new timings for the optimised paths (`-IncludeBench`) |
 
 `run_tests.ps1` sweeps every Blender it finds under

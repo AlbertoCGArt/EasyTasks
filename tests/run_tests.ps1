@@ -23,7 +23,7 @@ if (-not $Blender) {
 if (-not $Blender) { throw "No blender.exe found. Pass -Blender <path>." }
 
 # install_test needs a built zip and writes into a sandboxed config dir
-$suite = @('smoke_test.py', 'icon_test.py', 'install_test.py')
+$suite = @('smoke_test.py', 'icon_test.py', 'install_test.py', 'redundancy_test.py')
 if ($IncludeBench) { $suite += 'bench.py' }
 
 $sandbox = Join-Path $env:TEMP "et_test_cfg"
