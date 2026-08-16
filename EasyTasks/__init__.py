@@ -54,6 +54,9 @@ _vis_bookmarks  = {}       # {slot_name: {lc_name: hide_viewport}}
 _MAT_STRETCH    = "ET_FaceStretch"
 _VCOL_STRETCH   = "ET_Stretch"
 
+# Blender's duplicate suffix, e.g. the '.001' in 'Crate.001'.
+_SUFFIX_SPLIT_RE = re.compile(r'\.\d+$')
+
 
 # ---------------------------------------------------------------------------
 # Shared routing helpers  (Arrange Scene + auto-route handler both use these)
@@ -670,23 +673,31 @@ COLLECTION_STRUCTURE = [
 ]
 
 
+def _structure_children():
+    """{parent_name_or_None: [(index, name), ...]} built from COLLECTION_STRUCTURE."""
+    children = {}
+    for index, (name, parent, _color) in enumerate(COLLECTION_STRUCTURE):
+        children.setdefault(parent, []).append((index, name))
+    return children
+
+
 class ET_OT_OrganizeScene(bpy.types.Operator):
     bl_idname  = "et.organize_scene"
     bl_label   = "Project Structure"
     bl_description = "Choose which collections to create in the scene hierarchy"
     bl_options = {"REGISTER", "UNDO"}
 
-    use_production: bpy.props.BoolProperty(name="PRODUCTION", default=True)
-    use_studio:     bpy.props.BoolProperty(name="STUDIO",     default=True)
-    use_lights:     bpy.props.BoolProperty(name="LIGHTS",     default=True)
-    use_cameras:    bpy.props.BoolProperty(name="CAMERAS",    default=True)
-    use_modules:    bpy.props.BoolProperty(name="MODULES",    default=True)
-    use_floor:      bpy.props.BoolProperty(name="FLOOR",      default=True)
-    use_walls:      bpy.props.BoolProperty(name="WALLS",      default=True)
-    use_ceiling:    bpy.props.BoolProperty(name="CEILING",    default=True)
-    use_props:      bpy.props.BoolProperty(name="PROPS",      default=True)
-    use_decals:     bpy.props.BoolProperty(name="DECALS",     default=True)
-    use_blocking:   bpy.props.BoolProperty(name="BLOCKING",   default=True)
+    # One flag per entry in COLLECTION_STRUCTURE, indexed the same way. This
+    # replaces eleven hand-written BoolProperties plus a hand-written draw tree
+    # and a hand-written selections dict — three places that all had to agree
+    # about the hierarchy, and did not: the dialog drew every depth-2 collection
+    # after BLOCKING, so LIGHTS and CAMERAS appeared to be children of BLOCKING
+    # rather than of STUDIO.
+    use_colls: bpy.props.BoolVectorProperty(
+        name="Collections",
+        size=len(COLLECTION_STRUCTURE),
+        default=(True,) * len(COLLECTION_STRUCTURE),
+    )
 
     new_coll_name:   bpy.props.StringProperty(
         name="Name", default="",
@@ -700,114 +711,84 @@ class ET_OT_OrganizeScene(bpy.types.Operator):
 
     def invoke(self, context, event):
         existing = self._existing()
-        self.use_production = 'PRODUCTION' not in existing
-        self.use_studio     = 'STUDIO'     not in existing
-        self.use_lights     = 'LIGHTS'     not in existing
-        self.use_cameras    = 'CAMERAS'    not in existing
-        self.use_modules    = 'MODULES'    not in existing
-        self.use_floor      = 'FLOOR'      not in existing
-        self.use_walls      = 'WALLS'      not in existing
-        self.use_ceiling    = 'CEILING'    not in existing
-        self.use_props      = 'PROPS'      not in existing
-        self.use_decals     = 'DECALS'     not in existing
-        self.use_blocking   = 'BLOCKING'   not in existing
-        return context.window_manager.invoke_props_dialog(self, width=260)
+        # Pre-tick only what is missing, so re-running is a no-op by default.
+        self.use_colls = tuple(name not in existing
+                               for name, _parent, _color in COLLECTION_STRUCTURE)
+        return context.window_manager.invoke_props_dialog(self, width=300)
 
     def draw(self, context):
-        layout = self.layout
+        layout   = self.layout
         existing = self._existing()
-
-        def row_entry(parent_layout, prop, coll_name, indent=0):
-            row = parent_layout.row(align=True)
-            if indent:
-                row.separator(factor=indent * 3)
-            icon = 'OUTLINER_OB_GROUP_INSTANCE' if coll_name in existing else 'OUTLINER_COLLECTION'
-            row.prop(self, prop, text=coll_name, icon=icon)
-            if coll_name in existing:
-                row.label(text='exists')
+        children = _structure_children()
 
         layout.label(text="Select collections to create:", icon='OUTLINER_COLLECTION')
         layout.separator(factor=0.5)
 
-        row_entry(layout, 'use_production', 'PRODUCTION')
+        col = layout.column(align=True)
 
-        production_ok = self.use_production or 'PRODUCTION' in existing
-        studio_ok     = production_ok and (self.use_studio  or 'STUDIO'  in existing)
-        modules_ok    = production_ok and (self.use_modules or 'MODULES' in existing)
+        def draw_branch(parent, depth, parent_ok):
+            """Depth-first, so each collection is drawn directly under its parent."""
+            for index, name in children.get(parent, []):
+                is_existing = name in existing
 
-        sub = layout.column(align=True)
-        sub.enabled = production_ok
-        row_entry(sub, 'use_studio',   'STUDIO',   indent=1)
-        row_entry(sub, 'use_modules',  'MODULES',  indent=1)
-        row_entry(sub, 'use_blocking', 'BLOCKING', indent=1)
+                row = col.row(align=True)
+                row.enabled = parent_ok
+                if depth:
+                    row.separator(factor=depth * 2.0)
+                row.prop(self, 'use_colls', index=index, text=name, toggle=True,
+                         icon='OUTLINER_OB_GROUP_INSTANCE' if is_existing
+                              else 'OUTLINER_COLLECTION')
+                if is_existing:
+                    row.label(text='exists')
 
-        studio_sub = layout.column(align=True)
-        studio_sub.enabled = studio_ok
-        row_entry(studio_sub, 'use_lights',  'LIGHTS',  indent=2)
-        row_entry(studio_sub, 'use_cameras', 'CAMERAS', indent=2)
+                # A child is only reachable if its parent will be there afterwards.
+                draw_branch(name, depth + 1,
+                            parent_ok and (self.use_colls[index] or is_existing))
 
-        layout.separator(factor=0.3)
-
-        modules_sub = layout.column(align=True)
-        modules_sub.enabled = modules_ok
-        row_entry(modules_sub, 'use_floor',   'FLOOR',   indent=2)
-        row_entry(modules_sub, 'use_walls',   'WALLS',   indent=2)
-        row_entry(modules_sub, 'use_ceiling', 'CEILING', indent=2)
-        row_entry(modules_sub, 'use_props',   'PROPS',   indent=2)
-        row_entry(modules_sub, 'use_decals',  'DECALS',  indent=2)
+        draw_branch(None, 0, True)
 
         layout.separator()
         box = layout.box()
         box.label(text='Add Custom Collection:', icon='ADD')
         col = box.column(align=True)
-        col.prop(self, 'new_coll_name',   text='Name',   icon='OUTLINER_COLLECTION')
-        col.prop(self, 'new_coll_parent', text='Parent', icon='OUTLINER_OB_GROUP_INSTANCE')
+        col.prop(self, 'new_coll_name', text='Name')
+        col.prop_search(self, 'new_coll_parent', bpy.data, 'collections',
+                        text='Parent')
 
     def execute(self, context):
         scene = context.scene
 
         existing = {c.name: c for c in bpy.data.collections}
+        created  = 0
 
-        production_ok = self.use_production or 'PRODUCTION' in existing
-        studio_ok     = production_ok and (self.use_studio  or 'STUDIO'  in existing)
-        modules_ok    = production_ok and (self.use_modules or 'MODULES' in existing)
-
-        selections = {
-            'PRODUCTION': self.use_production,
-            'STUDIO':     self.use_studio    and production_ok,
-            'LIGHTS':     self.use_lights    and studio_ok,
-            'CAMERAS':    self.use_cameras   and studio_ok,
-            'MODULES':    self.use_modules   and production_ok,
-            'FLOOR':      self.use_floor     and modules_ok,
-            'WALLS':      self.use_walls     and modules_ok,
-            'CEILING':    self.use_ceiling   and modules_ok,
-            'PROPS':      self.use_props     and modules_ok,
-            'DECALS':     self.use_decals    and modules_ok,
-            'BLOCKING':   self.use_blocking  and production_ok,
-        }
-
-        for name, parent_name, color in COLLECTION_STRUCTURE:
-            if not selections.get(name):
+        # COLLECTION_STRUCTURE lists parents before children, so a single pass
+        # guarantees a parent is present by the time its children are handled.
+        for index, (name, parent_name, color) in enumerate(COLLECTION_STRUCTURE):
+            if not self.use_colls[index]:
                 continue
+            # Skip orphans rather than crashing on a missing parent.
+            if parent_name is not None and parent_name not in existing:
+                continue
+
             if name not in existing:
                 coll = bpy.data.collections.new(name)
                 existing[name] = coll
-                if parent_name is None:
-                    scene.collection.children.link(coll)
-                else:
-                    existing[parent_name].children.link(coll)
+                parent = (scene.collection if parent_name is None
+                          else existing[parent_name])
+                parent.children.link(coll)
+                created += 1
             existing[name].color_tag = color
 
-        name = self.new_coll_name.strip()
-        if name and name not in existing:
-            new_coll = bpy.data.collections.new(name)
-            existing[name] = new_coll
-            parent = self.new_coll_parent.strip()
-            if parent and parent in existing:
-                existing[parent].children.link(new_coll)
-            else:
-                scene.collection.children.link(new_coll)
+        custom = self.new_coll_name.strip()
+        if custom and custom not in existing:
+            new_coll = bpy.data.collections.new(custom)
+            existing[custom] = new_coll
+            parent_name = self.new_coll_parent.strip()
+            parent = existing.get(parent_name) if parent_name else None
+            (parent or scene.collection).children.link(new_coll)
+            created += 1
 
+        self.report({'INFO'}, f"Created {created} collection(s)")
         return {"FINISHED"}
 
 
@@ -1035,6 +1016,36 @@ def _collection_is_linked(coll, scene):
     return any(coll.name in other.children for other in bpy.data.collections)
 
 
+def _link_collection(coll, scene, parent_name=""):
+    """Put a freshly made collection into the tree, under parent_name if it exists."""
+    if _collection_is_linked(coll, scene):
+        return
+    parent = bpy.data.collections.get(parent_name.strip()) if parent_name else None
+    if parent is not None and parent is not coll:
+        parent.children.link(coll)
+    else:
+        scene.collection.children.link(coll)
+
+
+def _assign_to_collection(objects, coll, move):
+    """
+    Link objects into coll. When `move`, also unlink them from everywhere else.
+
+    Linking happens after unlinking within the same operator call, so an object
+    is never left without a collection.
+    """
+    count = 0
+    for obj in objects:
+        if move:
+            for current in list(obj.users_collection):
+                if current is not coll:
+                    current.objects.unlink(obj)
+        if obj.name not in coll.objects:
+            coll.objects.link(obj)
+        count += 1
+    return count
+
+
 class ET_SemanticSettings(bpy.types.PropertyGroup):
     category: bpy.props.EnumProperty(
         name="Category", items=_SEMANTIC_ENUM, default='FLOOR')
@@ -1122,23 +1133,10 @@ class ET_OT_AssignSemantic(bpy.types.Operator):
         if settings.color_tag:
             coll.color_tag = color
 
-        if not _collection_is_linked(coll, scene):
-            parent_name = settings.parent_root.strip()
-            parent = bpy.data.collections.get(parent_name) if parent_name else None
-            if parent is not None and parent is not coll:
-                parent.children.link(coll)
-            else:
-                scene.collection.children.link(coll)
+        _link_collection(coll, scene, settings.parent_root)
 
-        assigned = 0
-        for obj in context.selected_objects:
-            if settings.move:
-                for current in list(obj.users_collection):
-                    if current is not coll:
-                        current.objects.unlink(obj)
-            if obj.name not in coll.objects:
-                coll.objects.link(obj)
-            assigned += 1
+        assigned = _assign_to_collection(context.selected_objects, coll,
+                                         settings.move)
 
         verb = "Created" if created else "Added to"
         self.report({'INFO'}, f"{verb} '{name}' — {assigned} object(s)")
@@ -1191,6 +1189,195 @@ def draw_semantic_assign(layout, context):
         opts.prop(settings, 'move')
         opts.prop(settings, 'color_tag')
         opts.prop(settings, 'use_custom')
+
+
+# ---------------------------------------------------------------------------
+# Right-click ▸ Add to Collection
+#
+# Blender's own Move/Link to Collection (M / Shift+M) is a bare hierarchy
+# browser. This adds the thing it cannot do: it looks at what you selected and
+# suggests where it belongs, using the same matching Arrange Scene uses, and it
+# can create the collection with the project naming pattern and colour tag
+# already applied.
+# ---------------------------------------------------------------------------
+
+# Menus are drawn every time they open; past this many entries the list stops
+# being scannable and the search dialog is the better route.
+_MENU_COLLECTION_LIMIT = 20
+
+
+def _suggested_collection(context):
+    """Best-guess destination for the selection, or None."""
+    obj = context.active_object
+    if obj is None:
+        selected = context.selected_objects
+        if not selected:
+            return None
+        obj = selected[0]
+
+    target = _find_target_collection(obj)
+    if target is None:
+        return None
+    # Pointless to suggest the collection everything is already in.
+    # users_collection holds Collection objects, not names — comparing against
+    # target.name here silently never matched.
+    if all(target in o.users_collection for o in context.selected_objects):
+        return None
+    return target
+
+
+class ET_OT_AddToCollection(bpy.types.Operator):
+    bl_idname  = "et.add_to_collection"
+    bl_label   = "Add to Collection"
+    bl_description = ("Move or link the selected objects into a collection. "
+                      "Leave the name empty to search")
+    bl_options = {"REGISTER", "UNDO"}
+
+    collection_name: bpy.props.StringProperty(name="Collection")
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and bool(context.selected_objects)
+
+    def invoke(self, context, event):
+        # Called from a menu entry with a name -> act immediately.
+        # Called as "Search all…" with no name -> offer the search field.
+        if self.collection_name:
+            return self.execute(context)
+        return context.window_manager.invoke_props_dialog(self, width=300)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop_search(self, 'collection_name', bpy.data, 'collections',
+                           text="", icon='OUTLINER_COLLECTION')
+        layout.prop(context.scene.et_semantic, 'move')
+
+    def execute(self, context):
+        coll = bpy.data.collections.get(self.collection_name)
+        if coll is None:
+            self.report({'ERROR'},
+                        f"Collection '{self.collection_name}' not found")
+            return {'CANCELLED'}
+
+        move  = context.scene.et_semantic.move
+        count = _assign_to_collection(context.selected_objects, coll, move)
+        self.report({'INFO'},
+                    f"{'Moved' if move else 'Linked'} {count} object(s) "
+                    f"to '{coll.name}'")
+        return {"FINISHED"}
+
+
+class ET_OT_NewCollectionForSelection(bpy.types.Operator):
+    bl_idname  = "et.new_collection_for_selection"
+    bl_label   = "New Collection"
+    bl_description = "Create a collection and put the selected objects in it"
+    bl_options = {"REGISTER", "UNDO"}
+
+    name: bpy.props.StringProperty(name="Name", default="Collection")
+    parent: bpy.props.StringProperty(
+        name="Parent",
+        description="Existing collection to nest under. Blank = scene root")
+    color: bpy.props.EnumProperty(
+        name="Colour",
+        items=[('NONE', 'None', 'No colour tag')] +
+              [(tag, tag.replace('COLOR_', 'Colour '), '')
+               for tag in sorted(_COLOR_TAG_RGB)],
+        default='NONE')
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and bool(context.selected_objects)
+
+    def invoke(self, context, event):
+        # Seed the field from the active object so the common case is one Enter.
+        obj = context.active_object
+        if obj is not None:
+            self.name = _SUFFIX_SPLIT_RE.sub('', obj.name) or "Collection"
+        return context.window_manager.invoke_props_dialog(self, width=300)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, 'name')
+        layout.prop_search(self, 'parent', bpy.data, 'collections')
+        layout.prop(self, 'color')
+        layout.prop(context.scene.et_semantic, 'move')
+
+    def execute(self, context):
+        name = self.name.strip()
+        if not name:
+            self.report({'ERROR'}, "Give the collection a name")
+            return {'CANCELLED'}
+
+        scene   = context.scene
+        coll    = bpy.data.collections.get(name)
+        created = coll is None
+        if created:
+            coll = bpy.data.collections.new(name)
+        if self.color != 'NONE':
+            coll.color_tag = self.color
+
+        _link_collection(coll, scene, self.parent)
+        count = _assign_to_collection(context.selected_objects, coll,
+                                      scene.et_semantic.move)
+
+        self.report({'INFO'},
+                    f"{'Created' if created else 'Reused'} '{coll.name}' "
+                    f"— {count} object(s)")
+        return {"FINISHED"}
+
+
+class ET_MT_AddToCollectionMenu(bpy.types.Menu):
+    bl_idname = "ET_MT_add_to_collection"
+    bl_label  = "Add to Collection"
+
+    def draw(self, context):
+        layout   = self.layout
+        settings = context.scene.et_semantic
+
+        layout.prop(settings, 'move', text="Move (uncheck to link)")
+        layout.separator()
+
+        suggested = _suggested_collection(context)
+        if suggested is not None:
+            layout.label(text="Suggested", icon='OUTLINER_OB_LIGHT')
+            layout.operator('et.add_to_collection', text=suggested.name,
+                            icon='OUTLINER_COLLECTION'
+                            ).collection_name = suggested.name
+            layout.separator()
+
+        layout.operator('et.new_collection_for_selection',
+                        text="New Collection…", icon='ADD')
+        layout.menu('ET_MT_semantic_menu', text="By Category", icon='PRESET')
+        layout.separator()
+
+        collections = sorted(bpy.data.collections, key=lambda c: c.name)
+        if not collections:
+            layout.label(text="No collections yet", icon='INFO')
+            return
+
+        layout.label(text="Existing", icon='OUTLINER_COLLECTION')
+        for coll in collections[:_MENU_COLLECTION_LIMIT]:
+            layout.operator('et.add_to_collection',
+                            text=f"{coll.name}   ({len(coll.all_objects)})",
+                            icon='OUTLINER_COLLECTION'
+                            ).collection_name = coll.name
+
+        # Never silently truncate — say how many are hidden and offer search.
+        hidden = len(collections) - _MENU_COLLECTION_LIMIT
+        if hidden > 0:
+            layout.separator()
+            layout.operator('et.add_to_collection',
+                            text=f"Search all… (+{hidden} more)",
+                            icon='VIEWZOOM').collection_name = ""
+
+
+def draw_object_context_menu(self, context):
+    if context.mode != 'OBJECT' or not context.selected_objects:
+        return
+    layout = self.layout
+    layout.separator()
+    layout.menu('ET_MT_add_to_collection', text="Add to Collection",
+                icon='OUTLINER_COLLECTION')
 
 
 # ---------------------------------------------------------------------------
@@ -2702,6 +2889,10 @@ classes = (
     ET_SemanticSettings,
     ET_OT_AssignSemantic,
     ET_MT_SemanticMenu,
+    # Right-click ▸ Add to Collection
+    ET_OT_AddToCollection,
+    ET_OT_NewCollectionForSelection,
+    ET_MT_AddToCollectionMenu,
     ET_OT_ApplyModifiers,
     ET_OT_ClearModifiers,
     ET_OT_AddModifier,
@@ -2779,6 +2970,8 @@ def register():
 
     bpy.types.VIEW3D_MT_editor_menus.append(draw_header_add_menu)
     bpy.types.DATA_PT_modifiers.append(draw_modifier_panel_buttons)
+    bpy.types.VIEW3D_MT_object_context_menu.append(draw_object_context_menu)
+    bpy.types.OUTLINER_MT_object.append(draw_object_context_menu)
 
     kc = bpy.context.window_manager.keyconfigs.addon
     if kc:
@@ -2809,8 +3002,12 @@ def unregister():
             pass
     addon_keymaps.clear()
 
-    for draw_fn, target in ((draw_header_add_menu, bpy.types.VIEW3D_MT_editor_menus),
-                            (draw_modifier_panel_buttons, bpy.types.DATA_PT_modifiers)):
+    for draw_fn, target in (
+        (draw_header_add_menu,        bpy.types.VIEW3D_MT_editor_menus),
+        (draw_modifier_panel_buttons, bpy.types.DATA_PT_modifiers),
+        (draw_object_context_menu,    bpy.types.VIEW3D_MT_object_context_menu),
+        (draw_object_context_menu,    bpy.types.OUTLINER_MT_object),
+    ):
         try:
             target.remove(draw_fn)
         except (ValueError, AttributeError):
