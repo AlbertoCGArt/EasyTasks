@@ -1,7 +1,7 @@
 ﻿"""Validate every icon= string and every settings property the UI references.
 
 An unknown icon name raises at draw time, which breaks the whole panel, and a
-typo'd property name does the same â€” neither shows up in a headless op test.
+typo'd property name does the same — neither shows up in a headless op test.
 """
 import os as _os
 _ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
