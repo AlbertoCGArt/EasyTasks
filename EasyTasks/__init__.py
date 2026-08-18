@@ -1002,6 +1002,22 @@ def _semantic_collection_name(scene, label):
     return name.strip() or label
 
 
+def _collection_icon(coll):
+    """
+    Icon matching a collection's own colour tag.
+
+    Blender ships COLLECTION_COLOR_01..08 to mirror the eight tags, so the
+    buttons can carry the same colour the user sees in the outliner instead of
+    a uniform grey box. Untagged collections keep the plain outliner icon.
+    """
+    if coll is None:
+        return 'OUTLINER_COLLECTION'
+    tag = coll.color_tag
+    if tag and tag != 'NONE' and tag.startswith('COLOR_'):
+        return 'COLLECTION_' + tag
+    return 'OUTLINER_COLLECTION'
+
+
 def _collection_is_linked(coll, scene):
     """True if coll already sits somewhere in a collection tree."""
     if coll.name in scene.collection.children:
@@ -1280,8 +1296,10 @@ class ET_OT_PickQuickSlots(bpy.types.Operator):
             row = col.row(align=True)
             if slot.depth:
                 row.separator(factor=slot.depth * 2.0)
-            row.prop(slot, 'use', text=slot.name, toggle=True,
+            row.prop(slot, 'use', text="", toggle=True,
                      icon='CHECKBOX_HLT' if slot.use else 'CHECKBOX_DEHLT')
+            row.label(text=slot.name,
+                      icon=_collection_icon(bpy.data.collections.get(slot.name)))
 
         layout.separator(factor=0.5)
         row = layout.row(align=True)
@@ -1381,12 +1399,13 @@ def draw_semantic_assign(layout, context):
             grid = box.grid_flow(row_major=True, columns=2, align=True)
             missing = 0
             for slot in slots:
-                if bpy.data.collections.get(slot.name) is None:
+                coll = bpy.data.collections.get(slot.name)
+                if coll is None:
                     # Deleted or renamed since the last scan.
                     missing += 1
                     continue
                 grid.operator('et.add_to_collection', text=slot.name,
-                              icon='OUTLINER_COLLECTION'
+                              icon=_collection_icon(coll)
                               ).collection_name = slot.name
             if missing:
                 box.label(text=f"{missing} collection(s) gone — rescan",
@@ -1570,7 +1589,7 @@ class ET_MT_AddToCollectionMenu(bpy.types.Menu):
         if suggested is not None:
             layout.label(text="Suggested", icon='OUTLINER_OB_LIGHT')
             layout.operator('et.add_to_collection', text=suggested.name,
-                            icon='OUTLINER_COLLECTION'
+                            icon=_collection_icon(suggested)
                             ).collection_name = suggested.name
             layout.separator()
 
@@ -1588,7 +1607,7 @@ class ET_MT_AddToCollectionMenu(bpy.types.Menu):
         for coll in collections[:_MENU_COLLECTION_LIMIT]:
             layout.operator('et.add_to_collection',
                             text=f"{coll.name}   ({len(coll.all_objects)})",
-                            icon='OUTLINER_COLLECTION'
+                            icon=_collection_icon(coll)
                             ).collection_name = coll.name
 
         # Never silently truncate — say how many are hidden and offer search.

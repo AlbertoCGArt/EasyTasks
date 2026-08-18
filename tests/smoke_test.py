@@ -537,6 +537,24 @@ def unset_project_root_falls_back():
 check("clearing the project root falls back to presets", unset_project_root_falls_back)
 
 
+def collection_icons_follow_colour_tags():
+    """Quick Assign buttons should carry each collection's own tag colour."""
+    probe = bpy.data.collections.new("__tagged__")
+    try:
+        for n in range(1, 9):
+            probe.color_tag = f"COLOR_{n:02d}"
+            got = et._collection_icon(probe)
+            assert got == f"COLLECTION_COLOR_{n:02d}", got
+        probe.color_tag = 'NONE'
+        assert et._collection_icon(probe) == 'OUTLINER_COLLECTION'
+        assert et._collection_icon(None) == 'OUTLINER_COLLECTION'
+    finally:
+        bpy.data.collections.remove(probe)
+    notes.append("collection buttons use COLLECTION_COLOR_01..08 per tag")
+
+check("collection icons follow colour tags", collection_icons_follow_colour_tags)
+
+
 def auto_route_handler():
     assert et._auto_route_new_objects in bpy.app.handlers.depsgraph_update_post
     # cheap-path guard: no crash when the handler runs against the live scene
