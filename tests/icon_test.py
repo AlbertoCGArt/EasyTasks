@@ -28,6 +28,17 @@ source = open(SRC, encoding='utf-8').read()
 used = set(re.findall(r"icon\s*=\s*'([A-Z0-9_]+)'", source))
 used |= {icon for _k, _l, icon, _c in et.SEMANTIC_CATEGORIES}
 
+# _collection_icon() builds names at runtime from a collection's colour tag, so
+# the literal regex above cannot see them. Exercise it over every tag instead.
+probe = bpy.data.collections.new("__icon_probe__")
+tags = bpy.types.Collection.bl_rna.properties['color_tag'].enum_items.keys()
+for tag in tags:
+    probe.color_tag = tag
+    used.add(et._collection_icon(probe))
+used.add(et._collection_icon(None))
+bpy.data.collections.remove(probe)
+print(f"_collection_icon covers {len(tags)} colour tags")
+
 unknown = sorted(used - valid)
 print(f"{len(used)} distinct icon names referenced")
 if unknown:
