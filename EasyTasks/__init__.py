@@ -16,7 +16,7 @@ bl_info = {
     "author": "Alberto Cordero",
     "description": "Scene organisation, mesh cleanup and modelling analysis tools.",
     "blender": (3, 0, 0),
-    "version": (2, 4, 0),
+    "version": (2, 5, 0),
     "location": "View3D > Sidebar > EasyTasks, Ctrl+Shift+X, Q",
     "warning": "",
     "doc_url": "https://github.com/AlbertoCGArt/EasyTasks",
@@ -40,18 +40,18 @@ _isolation_state = {}      # {lc_name: hide_viewport} when in isolation mode
 _known_objects  = {}       # {scene_name: set(obj_name)}
 _route_pending  = False    # a routing timer is already queued
 
-# Viewport shading previews (silhouette / cavity). Keyed by space pointer so two
-# viewports can't clobber each other's saved shading.
+# Viewport shading previews (silhouette / cavity / face stretch). Keyed by space
+# pointer so two viewports can't clobber each other's saved shading.
 _shading_state  = {}       # {space_ptr: (mode, {prop: value})}
 
-# Face-stretch analyzer. Material *names* are stored, not ID pointers — holding
-# bpy IDs across an undo step can leave stale pointers behind.
-_stretch_state  = {}       # {obj_name: [material_name | None]}
+# Face-stretch analyzer. Records which meshes were given the temporary colour
+# attribute and which colour attribute was active before, so both can be put
+# back. Nothing about the mesh's materials is touched.
+_stretch_state  = {}       # {mesh_name: (active_index, render_index)}
 
 # session-only visibility bookmarks
 _vis_bookmarks  = {}       # {slot_name: {lc_name: hide_viewport}}
 
-_MAT_STRETCH    = "ET_FaceStretch"
 _VCOL_STRETCH   = "ET_Stretch"
 
 # Blender's duplicate suffix, e.g. the '.001' in 'Crate.001'.
@@ -257,8 +257,61 @@ def _active_preview(space):
     return entry[0] if entry else None
 
 
+def _iter_view3d_spaces():
+    """Every open 3D viewport across every window."""
+    try:
+        windows = bpy.context.window_manager.windows
+    except AttributeError:
+        return
+    for window in windows:
+        for area in window.screen.areas:
+            if area.type == 'VIEW_3D':
+                yield area.spaces.active
+
+
+def _restore_preview_mode(mode):
+    """Undo a named preview in every viewport showing it. Returns the count."""
+    restored = 0
+    for space in _iter_view3d_spaces():
+        ptr = space.as_pointer()
+        entry = _shading_state.get(ptr)
+        if entry and entry[0] == mode:
+            _apply_shading(space.shading, entry[1])
+            del _shading_state[ptr]
+            restored += 1
+    # Anything left under this mode belongs to a viewport that has since been
+    # closed; drop it so a stale entry cannot block the toggle later.
+    for ptr in [p for p, e in _shading_state.items() if e[0] == mode]:
+        del _shading_state[ptr]
+    return restored
+
+
+def _clear_stretch_attributes():
+    """Drop the face-stretch colour attribute from every mesh carrying it."""
+    if not _stretch_state:
+        return 0
+    return ET_OT_FaceStretchAnalyzer.restore_attributes()
+
+
+def _resolve_view3d(space):
+    """
+    The 3D viewport a preview should act on.
+
+    context.space_data is None in background mode, and is some other editor
+    when an operator is reached from a menu outside the 3D view, so fall back
+    to the first open viewport rather than dereferencing None.
+    """
+    if space is not None and getattr(space, 'type', None) == 'VIEW_3D':
+        return space
+    return next(_iter_view3d_spaces(), None)
+
+
 def _toggle_shading_preview(space, mode, settings):
     """Toggle a named preview on one viewport. Returns True if it is now on."""
+    space = _resolve_view3d(space)
+    if space is None:
+        return True
+
     ptr   = space.as_pointer()
     entry = _shading_state.pop(ptr, None)
 
@@ -266,6 +319,11 @@ def _toggle_shading_preview(space, mode, settings):
         _apply_shading(space.shading, entry[1])
         if entry[0] == mode:
             return False
+        if entry[0] == 'STRETCH':
+            # Another preview is taking this viewport over. Without this the
+            # colour attributes would linger and the panel would keep claiming
+            # Face Stretch was on while the viewport showed something else.
+            _clear_stretch_attributes()
 
     _shading_state[ptr] = (mode, _save_shading(space.shading))
     _apply_shading(space.shading, settings)
@@ -2576,7 +2634,8 @@ class ET_OT_FaceStretchAnalyzer(bpy.types.Operator):
                 vcol = mesh.vertex_colors.new(name=_VCOL_STRETCH)
         return vcol
 
-    def _remove_vcol(self, mesh):
+    @staticmethod
+    def _remove_vcol(mesh):
         if hasattr(mesh, 'color_attributes'):
             vcol = mesh.color_attributes.get(_VCOL_STRETCH)
             if vcol:
@@ -2586,63 +2645,101 @@ class ET_OT_FaceStretchAnalyzer(bpy.types.Operator):
             if vcol:
                 mesh.vertex_colors.remove(vcol)
 
-    def _build_mat(self):
-        mat = bpy.data.materials.get(_MAT_STRETCH)
-        if mat:
-            return mat
-        mat = bpy.data.materials.new(_MAT_STRETCH)
-        mat.use_nodes = True
-        nodes = mat.node_tree.nodes
-        links = mat.node_tree.links
-        nodes.clear()
-        out  = nodes.new('ShaderNodeOutputMaterial'); out.location  = (300, 0)
-        diff = nodes.new('ShaderNodeBsdfDiffuse');    diff.location = (100, 0)
-        vcol = nodes.new('ShaderNodeVertexColor');    vcol.location = (-100, 0)
-        vcol.layer_name = _VCOL_STRETCH
-        links.new(vcol.outputs['Color'], diff.inputs['Color'])
-        links.new(diff.outputs['BSDF'],  out.inputs['Surface'])
-        return mat
+    @staticmethod
+    def _colour_indices(mesh):
+        """(active, render) colour-attribute indices, or (None, None)."""
+        group = getattr(mesh, 'color_attributes', None)
+        if group is None:
+            legacy = getattr(mesh, 'vertex_colors', None)
+            return (getattr(legacy, 'active_index', None), None)
+        return (group.active_color_index, group.render_color_index)
+
+    @staticmethod
+    def _select_colour_layer(mesh, vcol):
+        """
+        Make vcol the layer solid shading displays.
+
+        Both indices are set because which one drives the Attribute display has
+        differed between Blender versions; setting both is correct either way.
+        """
+        group = getattr(mesh, 'color_attributes', None)
+        if group is None:
+            legacy = getattr(mesh, 'vertex_colors', None)
+            if legacy is not None:
+                legacy.active_index = legacy.find(vcol.name)
+            return
+        index = group.find(vcol.name)
+        if index < 0:
+            return
+        group.active_color_index = index
+        try:
+            group.render_color_index = index
+        except (AttributeError, TypeError):
+            pass
+
+    @staticmethod
+    def _restore_colour_indices(mesh, indices):
+        active, render = indices
+        group = getattr(mesh, 'color_attributes', None)
+        if group is None:
+            legacy = getattr(mesh, 'vertex_colors', None)
+            if legacy is not None and active is not None:
+                try:
+                    legacy.active_index = active
+                except (TypeError, RuntimeError):
+                    pass
+            return
+        for attr, value in (('active_color_index', active),
+                            ('render_color_index', render)):
+            if value is None:
+                continue
+            try:
+                setattr(group, attr, min(value, max(len(group) - 1, 0)))
+            except (AttributeError, TypeError, RuntimeError):
+                pass
+
+    @classmethod
+    def restore_attributes(cls):
+        """Remove the temporary colour attribute and put the old one back."""
+        restored = 0
+        for mesh_name, indices in _stretch_state.items():
+            mesh = bpy.data.meshes.get(mesh_name)
+            if mesh is None:
+                continue
+            cls._remove_vcol(mesh)
+            cls._restore_colour_indices(mesh, indices)
+            mesh.update()
+            restored += 1
+        _stretch_state.clear()
+        return restored
 
     def _restore(self):
-        """
-        Put every object's original materials back.
-
-        Restoring used to iterate context.selected_objects, so changing the
-        selection while the analyzer was on wiped the material slots of any
-        object that had scrolled out of the selection — and cleared the state
-        dict anyway, making the loss permanent.
-        """
-        restored = 0
-        for obj_name, mat_names in _stretch_state.items():
-            obj = bpy.data.objects.get(obj_name)
-            if obj is None or obj.type != 'MESH':
-                continue
-            obj.data.materials.clear()
-            for mat_name in mat_names:
-                obj.data.materials.append(
-                    bpy.data.materials.get(mat_name) if mat_name else None)
-            self._remove_vcol(obj.data)
-            restored += 1
-
-        _stretch_state.clear()
-
-        mat = bpy.data.materials.get(_MAT_STRETCH)
-        if mat is not None:
-            bpy.data.materials.remove(mat)
+        restored = self.restore_attributes()
+        _restore_preview_mode('STRETCH')
         return restored
 
     def execute(self, context):
+        # Nothing here touches materials. The previous version cleared
+        # mesh.materials and held the originals in a module-level dict, so a
+        # crash or a disabled add-on while the analyzer was on lost the user's
+        # material assignments with no way back. Writing a colour attribute and
+        # switching the viewport to display it is entirely non-destructive, and
+        # it is also instant because no material has to be rebuilt.
         if _stretch_state:
             restored = self._restore()
-            self.report({'INFO'}, f"Face stretch off — restored {restored} object(s)")
+            self.report({'INFO'},
+                        f"Face stretch off — {restored} mesh(es) restored")
             return {"FINISHED"}
 
-        mat     = self._build_mat()
         skipped = 0
-        shown   = 0
+        seen    = set()
 
         for obj in context.selected_objects:
             if obj.type != 'MESH':
+                continue
+            mesh = obj.data
+            # Several objects can share one mesh; colour it once.
+            if mesh.name in seen:
                 continue
 
             loop_colors = self._loop_colors(obj)
@@ -2650,31 +2747,32 @@ class ET_OT_FaceStretchAnalyzer(bpy.types.Operator):
                 skipped += 1
                 continue
 
-            mesh = obj.data
+            seen.add(mesh.name)
+            _stretch_state[mesh.name] = self._colour_indices(mesh)
+
             vcol = self._get_or_create_vcol(mesh)
             vcol.data.foreach_set('color', loop_colors)
+            self._select_colour_layer(mesh, vcol)
             mesh.update()
 
-            # Names, not material pointers: a pointer held across an undo step
-            # can dangle and crash Blender when it is dereferenced later.
-            _stretch_state[obj.name] = [m.name if m else None
-                                        for m in mesh.materials]
-            mesh.materials.clear()
-            mesh.materials.append(mat)
-            shown += 1
-
-        if not shown:
-            if mat is not None:
-                bpy.data.materials.remove(mat)
+        if not _stretch_state:
             self.report({'WARNING'}, "No selected mesh has usable UVs")
             return {'CANCELLED'}
 
-        msg = f"Face stretch on for {shown} mesh(es) — blue=compressed, green=ok, red=stretched"
+        # Mutually exclusive with the other previews, via the shared machinery.
+        _toggle_shading_preview(context.space_data, 'STRETCH', {
+            'type':       'SOLID',
+            'light':      'STUDIO',
+            'color_type': 'VERTEX',
+            'show_cavity': False,
+        })
+
+        msg = (f"Face stretch on for {len(_stretch_state)} mesh(es) — "
+               "blue=compressed, green=ok, red=stretched")
         if skipped:
             msg += f" ({skipped} skipped, no UV)"
         self.report({'INFO'}, msg)
         return {"FINISHED"}
-
 
 class ET_OT_SmartDuplicate(bpy.types.Operator):
     bl_idname  = "et.smart_duplicate"

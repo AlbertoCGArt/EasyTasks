@@ -10,7 +10,7 @@ _ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 import sys
 import bpy
 
-ZIP = _os.path.join(_ROOT, "easy_tasks_2.4.0.zip")
+ZIP = _os.path.join(_ROOT, "easy_tasks_2.5.0.zip")
 MODULE = "EasyTasks"
 
 failures = []

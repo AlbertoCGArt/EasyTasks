@@ -168,30 +168,84 @@ def wnormals_bevel_no_stack():
 check("et.wnormals_bevel does not stack modifiers", wnormals_bevel_no_stack)
 
 
-def face_stretch_roundtrip():
-    mat = bpy.data.materials.new("TestMat")
+def face_stretch_never_touches_materials():
+    """
+    The whole point of the rework: the analyzer must not modify materials.
+
+    The old implementation cleared mesh.materials and kept the originals in a
+    module-level dict, so a crash while it was on lost them permanently.
+    """
+    mat_a = bpy.data.materials.new("KeepMeA")
+    mat_b = bpy.data.materials.new("KeepMeB")
     bpy.ops.object.select_all(action='DESELECT')
     cube.select_set(True)
     bpy.context.view_layer.objects.active = cube
     cube.data.materials.clear()
-    cube.data.materials.append(mat)
-    original = [m.name for m in cube.data.materials]
+    cube.data.materials.append(mat_a)
+    cube.data.materials.append(mat_b)
+    before = [m.name for m in cube.data.materials]
 
     bpy.ops.et.face_stretch_analyzer()
-    assert cube.data.materials[0].name == et._MAT_STRETCH, \
-        [m.name for m in cube.data.materials]
 
-    # Deselect everything before toggling off: the old code restored from
-    # context.selected_objects and would have lost the material here.
+    during = [m.name for m in cube.data.materials]
+    assert during == before, f"materials changed while on: {during} != {before}"
+    assert et._VCOL_STRETCH in cube.data.color_attributes, \
+        "colour attribute was not created"
+    assert not any(m.name.startswith("ET_FaceStretch")
+                   for m in bpy.data.materials), "a temp material was created"
+
+    # Change the selection before toggling off — the old bug's trigger.
     bpy.ops.object.select_all(action='DESELECT')
     bpy.ops.et.face_stretch_analyzer()
 
-    restored = [m.name for m in cube.data.materials]
-    assert restored == original, f"{restored} != {original}"
-    assert bpy.data.materials.get(et._MAT_STRETCH) is None, "temp material left behind"
-    notes.append("face stretch restored materials with an empty selection")
+    after = [m.name for m in cube.data.materials]
+    assert after == before, f"materials changed after off: {after} != {before}"
+    assert et._VCOL_STRETCH not in cube.data.color_attributes, \
+        "colour attribute left behind"
+    notes.append("face stretch leaves materials untouched end to end")
 
-check("face stretch survives a selection change", face_stretch_roundtrip)
+check("face stretch never touches materials", face_stretch_never_touches_materials)
+
+
+def face_stretch_restores_active_colour_layer():
+    mesh = cube.data
+    keep = mesh.color_attributes.new("MyColours", 'FLOAT_COLOR', 'CORNER')
+    mesh.color_attributes.active_color_index = mesh.color_attributes.find(keep.name)
+    before = mesh.color_attributes.active_color_index
+
+    bpy.ops.object.select_all(action='DESELECT')
+    cube.select_set(True)
+    bpy.context.view_layer.objects.active = cube
+    bpy.ops.et.face_stretch_analyzer()
+    assert (mesh.color_attributes.active_color_index
+            == mesh.color_attributes.find(et._VCOL_STRETCH)), \
+        "stretch layer not made active"
+
+    bpy.ops.et.face_stretch_analyzer()
+    assert mesh.color_attributes.active_color_index == before, \
+        "previous active colour attribute not restored"
+    assert "MyColours" in mesh.color_attributes, "user's colour attribute removed"
+    mesh.color_attributes.remove(mesh.color_attributes["MyColours"])
+
+check("face stretch restores the active colour layer",
+      face_stretch_restores_active_colour_layer)
+
+
+def face_stretch_yields_to_silhouette():
+    bpy.ops.object.select_all(action='DESELECT')
+    cube.select_set(True)
+    bpy.context.view_layer.objects.active = cube
+    bpy.ops.et.face_stretch_analyzer()
+    assert et._stretch_state, "analyzer did not turn on"
+
+    # Silhouette takes the viewport over; the stretch attributes must go too,
+    # otherwise the panel keeps reporting Face Stretch as active.
+    et._clear_stretch_attributes()
+    assert not et._stretch_state, "stretch state survived being displaced"
+    assert et._VCOL_STRETCH not in cube.data.color_attributes, \
+        "colour attribute left behind after displacement"
+
+check("face stretch cleans up when displaced", face_stretch_yields_to_silhouette)
 
 
 def smart_duplicate_suffixed_name():

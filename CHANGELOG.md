@@ -2,6 +2,31 @@
 
 All notable changes to Easy Tasks are recorded here.
 
+## [2.5.0]
+
+### Changed
+- **Face Stretch Analyzer no longer touches materials.** It used to clear
+  `mesh.materials`, assign a temporary shader and hold the originals in a
+  module-level dict — so a crash, or the add-on being disabled, while the
+  analyzer was on lost the user's material assignments with no way back. No test
+  can cover that, because the failure mode is the process dying.
+
+  It now writes the `ET_Stretch` colour attribute, makes it the active colour
+  layer and switches the viewport to display it. Nothing destructive happens to
+  the data, it is instant because no material is built, and it drops the
+  temporary material and its node tree entirely.
+
+  Two consequences worth knowing: the viewport shows *every* object by its
+  colour attribute while the analyzer is on, not only the selection; and the
+  analyzer is now mutually exclusive with Silhouette and Cavity, which share the
+  same shading machinery, so enabling one cleans up the other.
+
+### Fixed
+- Preview toggles no longer raise when there is no 3D viewport in context —
+  in background mode, or when reached from a menu in another editor.
+- Meshes shared by several objects are coloured once rather than per object.
+
+
 ## [2.4.0]
 
 ### Added
