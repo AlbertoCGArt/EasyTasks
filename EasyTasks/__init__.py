@@ -14,10 +14,11 @@
 bl_info = {
     "name": "Easy Tasks",
     "author": "Alberto Cordero",
-    "description": "Scene organisation, mesh cleanup and modelling analysis tools.",
+    "description": "Scene organisation, mesh cleanup, modelling analysis, and "
+                   "Megascans import with paintable material blending.",
     "blender": (3, 0, 0),
-    "version": (2, 5, 0),
-    "location": "View3D > Sidebar > EasyTasks, Ctrl+Shift+X, Q",
+    "version": (2, 6, 0),
+    "location": "View3D > Sidebar > EasyTasks, Ctrl+Shift+X, Shift+Alt+X, Q",
     "warning": "",
     "doc_url": "https://github.com/AlbertoCGArt/EasyTasks",
     "tracker_url": "https://github.com/AlbertoCGArt/EasyTasks/issues",

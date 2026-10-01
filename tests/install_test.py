@@ -7,10 +7,19 @@ Run with:
 import os as _os
 _ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 
+import re
 import sys
 import bpy
 
-ZIP = _os.path.join(_ROOT, "easy_tasks_2.5.0.zip")
+# Read the version from bl_info rather than pinning it: a pinned name kept
+# testing the previous release's zip after every version bump.
+_SRC = open(_os.path.join(_ROOT, "EasyTasks", "__init__.py"), encoding="utf-8").read()
+_VERSION = ".".join(re.search(r'"version":\s*\((\d+),\s*(\d+),\s*(\d+)\)', _SRC).groups())
+ZIP = _os.path.join(_ROOT, f"easy_tasks_{_VERSION}.zip")
+if not _os.path.isfile(ZIP):
+    print(f"  FAIL  {ZIP} does not exist — run build.ps1 first")
+    print("RESULT: 1 FAILURE(S)")
+    sys.exit(1)
 MODULE = "EasyTasks"
 
 failures = []

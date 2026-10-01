@@ -2,7 +2,12 @@
 
 All notable changes to Easy Tasks are recorded here.
 
-## [Unreleased]
+## [2.6.0]
+
+Material tools join the scene tools: a Megascans importer, two-material
+blending with a hand-painted mask, presets, and a UV health check — plus fixes
+for three long-standing problems that could change or lose objects in your
+scene (see **Fixed**).
 
 ### Added
 - **Blend presets.** Seven starting points for the mask — Dirt in Crevices,
@@ -142,6 +147,31 @@ All notable changes to Easy Tasks are recorded here.
   highest by default, lowest on request — rather than whichever the OS listed
   last, and re-running over the same folder reuses the material instead of
   leaving a `.001` behind.
+
+### Fixed
+- **Apply Scale / Rotation / Location applied all three transforms.**
+  `object.transform_apply` defaults every flag to True, and the pie and
+  FavTools buttons set only their own — so Apply Scale also zeroed rotation and
+  moved the origin to the world origin. Every button now sets all three flags,
+  the way Blender's own Object ▸ Apply menu does.
+- **Batch Export ignored its Rotation and Location checkboxes** for the same
+  reason: unticked transforms were baked into your objects anyway.
+- **Auto-route reorganised files you opened.** It never forgot the previous
+  file's objects, so a file opened afterwards with a scene also called "Scene"
+  had its objects silently moved into matching collections on the first click,
+  in a step undo could not reverse. Objects brought back by Ctrl+Z were
+  re-routed the same way. The snapshot is now reset on load, undo and redo, and
+  a file load also drops isolation, preview, Face Stretch and bookmark state
+  kept for the previous file.
+- **Auto-route, Arrange Scene and Add to Collection could strand objects.**
+  Routing considered every collection in the file — another scene's, orphaned
+  ones, library-linked ones — and unlinked an object before linking it. A
+  refused link left the object in no collection, lost on save; an off-scene
+  target took it out of the scene. Only editable collections in the current
+  scene are candidates now, objects are linked before they are unlinked, and a
+  move no longer pulls an object out of other scenes or the rigid body world.
+- **Blender 3.0 is verified, not just claimed.** The full test suite now runs
+  green on 3.0 as well as 3.5, 4.0, 4.2, 4.5, 5.1 and 5.2.
 
 
 ## [2.5.0]
