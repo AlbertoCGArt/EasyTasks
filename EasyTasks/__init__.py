@@ -2935,6 +2935,27 @@ _DIRECTION_VECTORS = {
 # unconnected by design.
 _BLEND_SLOTS = ('BASE', 'ROUGH', 'METAL', 'SPEC', 'ALPHA', 'NORMAL', 'DISP', 'AO')
 
+# What a missing map means, as the colour a Mix input takes in its place: the
+# value the Principled BSDF uses when nothing is plugged in (or, for the
+# normal, a flat tangent-space normal and, for height, the displacement
+# mid-level). Mixing against these keeps a map only one side has inside the
+# mask instead of spreading it across the whole surface.
+_NEUTRAL_RGBA = {
+    'BASE':   (0.8, 0.8, 0.8, 1.0),
+    'ROUGH':  (0.5, 0.5, 0.5, 1.0),
+    'METAL':  (0.0, 0.0, 0.0, 1.0),
+    'SPEC':   (0.5, 0.5, 0.5, 1.0),
+    'ALPHA':  (1.0, 1.0, 1.0, 1.0),
+    'NORMAL': (0.5, 0.5, 1.0, 1.0),
+    'DISP':   (0.5, 0.5, 0.5, 1.0),
+    'AO':     (1.0, 1.0, 1.0, 1.0),
+}
+
+# Base-only detail maps pass straight through: the overlay has nothing to say
+# about them, and flattening the base's height or normals everywhere would be
+# a loss, not a blend.
+_KEEP_BASE_DETAIL = {'NORMAL', 'DISP'}
+
 # Starting points for the mask, because the useful values are not guessable and
 # every one of these took a round of trial and error to find. Keys match the
 # operator's own property names so a preset can be applied to either the dialog
@@ -3593,20 +3614,28 @@ def _build_blend_material(name, slots_a, slots_b, use_ao=False, use_mapping=True
     y = 500
     for slot in _BLEND_SLOTS:
         a, b = source_a.get(slot), source_b.get(slot)
-        if a is None or b is None:
-            # only one side has it — pass it straight through rather than
-            # mixing against a flat colour that would wash the map out
-            if a is not None or b is not None:
-                blended[slot] = a if a is not None else b
+        if a is None and b is None:
+            continue
+        # The base's own detail maps survive untouched when the overlay simply
+        # has none — there is nothing to mix them with. Everything else that
+        # only one side has is mixed against the value the BSDF would have used
+        # without it: wired straight through, an overlay's metalness or opacity
+        # made the whole surface metallic or see-through, not just the mask.
+        if b is None and slot in _KEEP_BASE_DETAIL:
+            blended[slot] = a
             continue
         mix, fac, in_a, in_b, out = _new_mix(nodes, 'MIX')
         mix.location = (-760, y)
         mix.label    = slot.title()
         links.new(mask, fac)
-        links.new(a, in_a)
-        links.new(b, in_b)
+        for socket, source in ((in_a, a), (in_b, b)):
+            if source is not None:
+                links.new(source, socket)
+            else:
+                socket.default_value = _NEUTRAL_RGBA[slot]
         blended[slot] = out
-        mixed.append(slot.lower())
+        mixed.append(slot.lower() if a is not None and b is not None
+                     else f"{slot.lower()} (vs neutral)")
         y -= 220
 
     wired = _wire_principled(nodes, links, mat, bsdf, output, blended,

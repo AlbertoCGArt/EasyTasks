@@ -214,9 +214,11 @@ and remove instead of needing separate add/erase masks.
 - Painting targets that one image and nothing else, so a stray stroke can't
   land on the Megascans albedo and overwrite your library file.
 
-Channels only one material has — a height map the dirt doesn't ship — pass
-straight through rather than being mixed against a flat colour that would wash
-them out.
+Maps only one material has stay where they belong. A height or normal map the
+dirt doesn't ship keeps the base's detail everywhere. A map only the overlay
+has — metalness, opacity, a normal — appears only inside the mask, mixed
+against the value the surface would have without it, so rusty patches don't
+turn the whole floor metallic.
 
 The blend is a **new material** — the two sources are read, never modified, and
 stay in your file. It replaces the material the object actually renders: the

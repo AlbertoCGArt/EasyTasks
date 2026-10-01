@@ -2374,6 +2374,57 @@ def masks_are_kept_on_ctrl_s():
 check("painted masks are saved along with the .blend", masks_are_kept_on_ctrl_s)
 
 
+def overlay_only_maps_stay_inside_the_mask():
+    """
+    A map only the overlay has was wired straight to the BSDF, so the whole
+    surface — not just the masked area — went metallic or transparent.
+    Missing sides now mix against the value the BSDF would otherwise have had.
+    """
+    import tempfile
+    folder = tempfile.mkdtemp(prefix="et_leak_")
+    base = {'BASE': _os.path.join(folder, "Tile_2K_Albedo.png")}
+    over = {'BASE': _os.path.join(folder, "Rust_2K_Albedo.png"),
+            'METAL': _os.path.join(folder, "Rust_2K_Metalness.png"),
+            'ALPHA': _os.path.join(folder, "Rust_2K_Opacity.png"),
+            'NORMAL': _os.path.join(folder, "Rust_2K_Normal.png")}
+    _write_textures(folder, [_os.path.splitext(_os.path.basename(p))[0]
+                             for p in list(base.values()) + list(over.values())])
+
+    mat, _notes = et._build_blend_material("LeakProbe", base, over,
+                                           displacement='NONE', use_mapping=False)
+    nodes = mat.node_tree.nodes
+    bsdf  = next(n for n in nodes if n.type == 'BSDF_PRINCIPLED')
+    mask  = nodes[et._MASK_NODE_NAME]
+
+    def mixed_against(socket_name, neutral):
+        mix = _feeding_node(bsdf, socket_name)
+        assert mix is not None and mix.type in {'MIX', 'MIX_RGB'}, \
+            f"{socket_name} is wired straight through: {mix and mix.type}"
+        factor = next(s for s in mix.inputs
+                      if s.name in {'Factor', 'Fac'} and s.type == 'VALUE')
+        assert factor.links and factor.links[0].from_node == mask, \
+            f"{socket_name} mix is not driven by the mask"
+        a = [s for s in mix.inputs if s.type == 'RGBA'][0]
+        assert not a.links, f"{socket_name}: base side should be the neutral value"
+        assert abs(a.default_value[0] - neutral) < 1e-6, \
+            f"{socket_name}: base side is {a.default_value[0]}, expected {neutral}"
+
+    mixed_against('Metallic', 0.0)
+    mixed_against('Alpha', 1.0)
+
+    # a normal only the overlay has must not repaint the base's surface either
+    nmap = _feeding_node(bsdf, 'Normal')
+    while nmap is not None and nmap.type != 'NORMAL_MAP':
+        nmap = _feeding_node(nmap, 'Normal') if 'Normal' in nmap.inputs else None
+    assert nmap is not None, "no normal map in the chain"
+    assert _feeding_node(nmap, 'Color').type in {'MIX', 'MIX_RGB'}, \
+        "overlay-only normal was wired across the whole surface"
+    bpy.data.materials.remove(mat)
+
+check("overlay-only maps stay inside the mask",
+      overlay_only_maps_stay_inside_the_mask)
+
+
 # --- unregister ------------------------------------------------------------
 check("unregister()", et.unregister)
 

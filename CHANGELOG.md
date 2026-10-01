@@ -67,8 +67,12 @@ All notable changes to Easy Tasks are recorded here.
   so a stray stroke cannot land on the Megascans albedo and overwrite the
   library file itself.
 
-  Channels only one side has pass straight through instead of being mixed
-  against a flat colour that would wash them out.
+  Maps only one side has stay where they belong. The base's own height and
+  normal pass straight through when the overlay has none. Anything else only
+  one side has is mixed against the value the BSDF would use without it —
+  metal 0, opacity 1, a flat normal — because wired straight through, an
+  overlay's metalness or opacity made the whole surface metallic or
+  see-through rather than just the masked area.
 
   The blend is a new material; the two sources are read and never written. It
   lands on the slots the object's faces actually use, and only those still
