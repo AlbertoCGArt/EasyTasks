@@ -3156,6 +3156,42 @@ def _paint_color_layer(mesh):
     return layer
 
 
+def _current_paint_type(node):
+    """'IMAGE' or 'VERTEX' for the layer feeding the mask's Paint input, or None."""
+    socket = node.inputs.get('Paint') if node is not None else None
+    if socket is None or not socket.links:
+        return None
+    kind = socket.links[0].from_node.type
+    return {'TEX_IMAGE': 'IMAGE', 'ATTRIBUTE': 'VERTEX'}.get(kind)
+
+
+def _default_paint_type(obj, node):
+    """
+    Which layer a plain click on Paint Blend Mask should use.
+
+    The one the material already paints with, so the toggle never quietly
+    swaps layers; otherwise an image, unless the object has no UVs to paint
+    an image through — then vertex colour, rather than an error.
+    """
+    current = _current_paint_type(node)
+    if current is not None:
+        return current
+    has_uvs = bool(getattr(getattr(obj, 'data', None), 'uv_layers', None))
+    return 'IMAGE' if has_uvs else 'VERTEX'
+
+
+def _paint_needs_setup(node, mask_type):
+    """
+    True the first time an image mask is made on this material: the one moment
+    there is a real choice to offer (its resolution). Vertex colour has none,
+    and an existing image layer is simply reused.
+    """
+    if mask_type != 'IMAGE' or node is None:
+        return False
+    return not any(n.type == 'TEX_IMAGE' and n.name.startswith(_BLEND_PAINT_NODE)
+                   for n in node.id_data.nodes)
+
+
 def _blend_paint_image(node):
     """The image feeding a Blend Mask node's Paint input, if it is one."""
     socket = node.inputs.get('Paint') if node is not None else None
@@ -3999,13 +4035,46 @@ class ET_OT_PaintBlendMask(bpy.types.Operator):
         default='IMAGE')
     resolution: bpy.props.EnumProperty(
         name="Resolution",
-        items=[('1024', "1K", ""), ('2048', "2K", ""), ('4096', "4K", "")],
+        items=[('1024', "1K", "Light, fine for broad grime"),
+               ('2048', "2K", "A good default for most surfaces"),
+               ('4096', "4K", "Crisp edges on large, close-up surfaces")],
         default='2048')
 
     @classmethod
     def poll(cls, context):
         obj = context.active_object
         return obj is not None and obj.type == 'MESH'
+
+    def invoke(self, context, event):
+        """
+        A click toggles paint mode — except the first time an image mask is
+        made on a material, when there is a real choice to make (its
+        resolution) and a short dialog asks for it. Without this, Paint On and
+        Resolution could only be changed from Python.
+        """
+        obj = context.active_object
+        if obj.mode in {'TEXTURE_PAINT', 'VERTEX_PAINT'}:
+            return self.execute(context)
+
+        node = _active_blend_mask(context)
+        # The panel's Image / Vertex Color buttons set the type; a plain click
+        # keeps whatever the material already paints with.
+        if not self.properties.is_property_set('mask_type'):
+            self.mask_type = _default_paint_type(obj, node)
+
+        if _paint_needs_setup(node, self.mask_type) and obj.data.uv_layers:
+            return context.window_manager.invoke_props_dialog(self, width=320)
+        return self.execute(context)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.prop(self, 'mask_type')
+        row = layout.row()
+        row.enabled = self.mask_type == 'IMAGE'
+        row.prop(self, 'resolution')
+        layout.label(text="White adds the overlay, black scrubs it — X swaps",
+                     icon='INFO')
 
     def execute(self, context):
         obj = context.active_object
@@ -4044,8 +4113,8 @@ class ET_OT_PaintBlendMask(bpy.types.Operator):
         # already-painted material and still have nothing to paint onto.
         if self.mask_type == 'IMAGE' and not obj.data.uv_layers:
             self.report({'ERROR'},
-                        f"{obj.name} has no UV map — unwrap it, or set Paint On to "
-                        f"Vertex Color")
+                        f"{obj.name} has no UV map — unwrap it, or pick Vertex "
+                        f"Color under Paint in the Blend Mask panel")
             return {'CANCELLED'}
 
         source = self._resolve_source(obj, mat, node)
@@ -5454,6 +5523,16 @@ class ET_PT_BlendMaskPanel(bpy.types.Panel):
                      text='Painting  ●  ON' if painting else 'Paint Blend Mask',
                      icon='BRUSH_DATA',
                      depress=painting)
+        if not painting:
+            # Which layer to paint on. The highlighted one is what the plain
+            # button above uses; the other starts (or returns to) that layer.
+            current = _default_paint_type(obj, node)
+            row = box.row(align=True)
+            row.label(text="Paint On")
+            for kind, text, icon in (('IMAGE', "Image", 'IMAGE_DATA'),
+                                     ('VERTEX', "Vertex Color", 'VPAINT_HLT')):
+                row.operator('et.paint_blend_mask', text=text, icon=icon,
+                             depress=(current == kind)).mask_type = kind
         slider(box, 'Paint Influence', 'Paint Influence')
 
         # Unsaved paint renders as an unpainted mask, so say so where it will

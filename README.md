@@ -189,7 +189,9 @@ layer: **white adds** the overlay, **black scrubs it back** to the base, and
 and remove instead of needing separate add/erase masks.
 
 - Paints onto an **image** by default — full resolution on any mesh, needs UVs —
-  or a **vertex colour** layer when the object has none.
+  or a **vertex colour** layer, picked automatically when the object has no
+  UVs. **Paint On ▸ Image / Vertex Color** in the panel switches between them,
+  and the first image mask on a material asks once for its resolution (1K–4K).
 - On a tiling surface it adds its own `ET_BlendPaintUV` layer, a copy of your
   layout scaled into 0-1. Without it a single stroke would appear in every tile
   at once, because that's what tiled UVs are for. Your texture UVs are left

@@ -2536,6 +2536,54 @@ check("paint colours reach this Blender's paint settings",
       paint_colours_reach_this_blenders_settings)
 
 
+def paint_layer_choice_is_reachable():
+    """
+    Paint On (Image / Vertex Color) and the mask resolution were operator
+    properties no UI ever showed, and the no-UV error told the user to change
+    a setting they could not reach. The choices are now made for them where
+    the answer is obvious, and asked for where it is not.
+    """
+    _ensure_object_mode()
+    blend = _run_blend(material_a="Concrete", material_b="DirtGrime",
+                       assign_to_selected=False)
+    node = blend.node_tree.nodes[et._MASK_NODE_NAME]
+
+    with_uvs = bpy.data.objects.new("ChoiceUV", bpy.data.meshes.new("ChoiceUVM"))
+    with_uvs.data.from_pydata([(0, 0, 0), (1, 0, 0), (1, 1, 0)], [], [(0, 1, 2)])
+    with_uvs.data.uv_layers.new(name="UVMap")
+    no_uvs = bpy.data.objects.new("ChoiceNoUV", bpy.data.meshes.new("ChoiceNoUVM"))
+    no_uvs.data.from_pydata([(0, 0, 0), (1, 0, 0), (1, 1, 0)], [], [(0, 1, 2)])
+    for obj in (with_uvs, no_uvs):
+        scene.collection.objects.link(obj)
+
+    # nothing painted yet: image when it can be, vertex colour when it cannot
+    assert et._default_paint_type(with_uvs, node) == 'IMAGE'
+    assert et._default_paint_type(no_uvs, node) == 'VERTEX', \
+        "an object with no UVs was sent down the image path to an error"
+    # first image mask on this material: worth asking for the resolution once
+    assert et._paint_needs_setup(node, 'IMAGE')
+    assert not et._paint_needs_setup(node, 'VERTEX'), \
+        "vertex colour has nothing to choose, it should not ask"
+
+    # once a layer exists, keep using it and stop asking
+    bpy.ops.object.select_all(action='DESELECT')
+    no_uvs.data.materials.append(blend)
+    no_uvs.select_set(True)
+    bpy.context.view_layer.objects.active = no_uvs
+    bpy.ops.et.paint_blend_mask('EXEC_DEFAULT', mask_type='VERTEX')
+    _ensure_object_mode()
+    assert et._current_paint_type(node) == 'VERTEX'
+    assert et._default_paint_type(with_uvs, node) == 'VERTEX', \
+        "the toggle ignored the paint layer the material already uses"
+
+    # and the no-UV error points somewhere real
+    source = open(SRC, encoding='utf-8').read()
+    assert "set Paint On to" not in source, \
+        "an error still sends the user to a setting with no UI"
+
+check("the paint layer choice is reachable", paint_layer_choice_is_reachable)
+
+
 # --- unregister ------------------------------------------------------------
 check("unregister()", et.unregister)
 
