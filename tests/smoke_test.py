@@ -2510,6 +2510,32 @@ check("paint UV name is the same on every object sharing a blend",
       paint_uv_name_is_the_same_on_every_object)
 
 
+def paint_colours_reach_this_blenders_settings():
+    """
+    Unified paint settings moved from ToolSettings onto each paint mode in 5.x,
+    and unified colour is on by default — so the colours were written to a
+    holder that no longer existed and the first stroke painted with whatever
+    was there, often black: removing the overlay instead of adding it.
+    """
+    ts = bpy.context.scene.tool_settings
+    for mode in ('image_paint', 'vertex_paint'):
+        paint = getattr(ts, mode)
+        unified = getattr(paint, 'unified_paint_settings', None) \
+            or getattr(ts, 'unified_paint_settings', None)
+        assert unified is not None, f"no unified paint settings for {mode}"
+        unified.color = (0.0, 0.0, 0.0)
+        unified.secondary_color = (1.0, 1.0, 1.0)
+
+        et.ET_OT_PaintBlendMask._set_brush_colors(bpy.context, paint)
+        assert tuple(round(c, 3) for c in unified.color) == (1.0, 1.0, 1.0), \
+            f"{mode}: primary colour is {unified.color[:]}, not white (add)"
+        assert tuple(round(c, 3) for c in unified.secondary_color) == (0.0, 0.0, 0.0), \
+            f"{mode}: secondary colour is {unified.secondary_color[:]}, not black"
+
+check("paint colours reach this Blender's paint settings",
+      paint_colours_reach_this_blenders_settings)
+
+
 # --- unregister ------------------------------------------------------------
 check("unregister()", et.unregister)
 

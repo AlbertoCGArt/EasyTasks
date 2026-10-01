@@ -4224,10 +4224,20 @@ class ET_OT_PaintBlendMask(bpy.types.Operator):
 
     @staticmethod
     def _set_brush_colors(context, paint):
-        """Brushes became assets in 5.0, so every one of these may be absent."""
-        ts      = context.scene.tool_settings
-        unified = getattr(ts, 'unified_paint_settings', None)
-        for holder in (getattr(paint, 'brush', None), unified):
+        """
+        White to add the overlay, black to scrub it — on whichever holder this
+        Blender actually paints with.
+
+        Unified paint settings lived on ToolSettings until 5.0 and on each
+        paint mode after it; unified colour is on by default, so writing only
+        to the old place left 5.x painting with whatever colour was there.
+        Brushes became assets in 5.0 too, so any of these may be absent.
+        """
+        ts = context.scene.tool_settings
+        holders = (getattr(paint, 'brush', None),
+                   getattr(paint, 'unified_paint_settings', None),   # 5.0+
+                   getattr(ts, 'unified_paint_settings', None))      # before 5.0
+        for holder in holders:
             if holder is None:
                 continue
             for attr, value in (('color', (1.0, 1.0, 1.0)),
