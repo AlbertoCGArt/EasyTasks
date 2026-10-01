@@ -3102,35 +3102,83 @@ def _blend_paint_image(node):
     return None
 
 
+def _blend_dir():
+    """Folder of the open .blend, or '' if it has never been saved."""
+    return os.path.dirname(bpy.data.filepath) if bpy.data.filepath else ""
+
+
+def _blend_stem():
+    """File name of the open .blend without its extension, or ''."""
+    return os.path.splitext(os.path.basename(bpy.data.filepath))[0] \
+        if bpy.data.filepath else ""
+
+
+def _mask_file_path(image):
+    """
+    Where a painted mask lives on disk: textures/ beside the .blend.
+
+    The file name carries the .blend's own name as well as the image's. Keyed
+    on the image alone — which is the material's name — a second .blend in the
+    same folder with a material of the same name silently overwrote the first
+    one's painting. bpy.path.clean_name keeps characters a material name may
+    hold but a file name may not out of the path.
+    """
+    stem = bpy.path.clean_name(f"{_blend_stem()}_{image.name}" if _blend_stem()
+                               else image.name)
+    return os.path.join(_blend_dir(), "textures", f"{stem}.png")
+
+
 def _save_blend_mask_image(image):
     """
-    Write a painted mask out to its file.
+    Make a painted mask's pixels durable. Returns True when something was kept.
 
-    Paint lives in memory until something writes it. The file on disk is
-    whatever was there when the mask was created — flat grey — so anything that
-    re-reads the image shows an unpainted mask and the blend looks like it
-    ignored the painting entirely.
+    Paint lives in memory until something writes it, and a generated image is
+    rebuilt from its flat grey on every reload — so an unsaved mask renders
+    blank and the blend looks like it ignored the painting entirely.
 
-    Order matters: packing a dirty image packs the *stale file* and marks the
-    buffer clean, throwing the paint away. Save first, then pack, never the
-    other way round.
+      * already has a file      -> save over it
+      * .blend saved, no file   -> give it one in textures/ and save
+      * .blend never saved      -> pack it, so the pixels travel in the .blend
 
-    Returns True when something was written.
+    A painted generated image packs its current buffer. (An *unpainted* one
+    does not, which is what made this look impossible earlier.) Order matters
+    for file images: packing a dirty one packs the stale file and marks the
+    buffer clean, throwing the paint away — save first, then refresh the pack.
     """
     if image is None or not image.is_dirty:
         return False
     try:
+        if not image.filepath_raw and _blend_dir():
+            path = _mask_file_path(image)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            image.filepath_raw = path
+            image.file_format  = 'PNG'
         if image.filepath_raw:
             image.save()
             if image.packed_file is not None:
                 image.pack()          # refresh the packed copy from the file
             return True
-        if image.packed_file is not None:
-            image.pack()
-            return True
-    except RuntimeError:
+        image.pack()
+        return image.packed_file is not None
+    except (RuntimeError, OSError):
         return False
-    return False
+
+
+@bpy.app.handlers.persistent
+def _save_masks_before_file_save(*_args):
+    """
+    Keep painted masks whenever the .blend is saved.
+
+    Leaving paint mode through the Blend Mask button saves the mask, but leaving
+    any other way — Tab, the mode menu, another tool — did not, and Ctrl+S
+    then wrote a file whose mask reloads as flat grey.
+    """
+    for mat in bpy.data.materials:
+        if mat.library is not None or not getattr(mat, 'use_nodes', False):
+            continue
+        node = mat.node_tree.nodes.get(_MASK_NODE_NAME)
+        if node is not None:
+            _save_blend_mask_image(_blend_paint_image(node))
 
 
 class ET_OT_SaveBlendMask(bpy.types.Operator):
@@ -3152,10 +3200,14 @@ class ET_OT_SaveBlendMask(bpy.types.Operator):
             return {"FINISHED"}
         if not _save_blend_mask_image(image):
             self.report({'ERROR'},
-                        f"{image.name} has nowhere to save to — save the .blend "
-                        f"first, then paint again")
+                        f"Could not write {image.name} — check the textures folder "
+                        f"beside the .blend is writable")
             return {'CANCELLED'}
-        self.report({'INFO'}, f"Saved {image.name}")
+        if image.filepath_raw:
+            self.report({'INFO'}, f"Saved {image.name} to textures/")
+        else:
+            self.report({'INFO'},
+                        f"Packed {image.name} into the .blend — save the file to keep it")
         return {"FINISHED"}
 
 
@@ -3897,11 +3949,13 @@ class ET_OT_PaintBlendMask(bpy.types.Operator):
             # reads the flat grey the mask was created with.
             image = _blend_paint_image(_active_blend_mask(context))
             if _save_blend_mask_image(image):
-                self.report({'INFO'}, f"Left paint mode, saved {image.name}")
+                where = "saved to textures/" if image.filepath_raw \
+                    else "packed into the .blend"
+                self.report({'INFO'}, f"Left paint mode, {image.name} {where}")
             elif image is not None and image.is_dirty:
                 self.report({'WARNING'},
                             f"Left paint mode, but {image.name} could not be "
-                            f"saved — save the .blend, then use Save Painted Mask")
+                            f"written — check the textures folder is writable")
             else:
                 self.report({'INFO'}, "Left paint mode")
             return {'FINISHED'}
@@ -4044,23 +4098,18 @@ class ET_OT_PaintBlendMask(bpy.types.Operator):
 
     def _persist(self, image):
         """
-        Give the mask a file on disk, next to the blend.
+        Give the mask a file on disk, beside the .blend, as soon as it exists.
 
-        A generated image cannot be packed — Blender declines silently, it does
-        not raise — and its pixels are rebuilt from generated_color on every
-        reload, so anything painted would simply be gone. Writing it out is the
-        only thing that actually keeps it. Same `textures/` convention Scene
-        Snapshot uses for `snapshots/`.
+        In a .blend that has never been saved there is nowhere to put it yet;
+        that is fine — once painted, the mask is packed into the .blend when it
+        is saved (see _save_blend_mask_image and _save_masks_before_file_save).
         """
-        if not bpy.data.filepath:
-            self._cautions.append(
-                f"{image.name} exists only in memory — save the .blend, then use "
-                f"Save Painted Mask, or the paint is lost on reload")
+        if not _blend_dir():
             return
-        folder = os.path.join(os.path.dirname(bpy.data.filepath), "textures")
+        path = _mask_file_path(image)
         try:
-            os.makedirs(folder, exist_ok=True)
-            image.filepath_raw = os.path.join(folder, f"{image.name}.png")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            image.filepath_raw = path
             image.file_format  = 'PNG'
             image.save()
         except (RuntimeError, OSError) as exc:
@@ -5613,11 +5662,13 @@ _KEYMAP_SPEC = (
 
 
 # Undo and redo only invalidate the auto-route snapshot; loading a file
-# invalidates every piece of state kept for the previous one.
+# invalidates every piece of state kept for the previous one; saving a file
+# makes any painted masks durable first.
 _STATE_HANDLERS = (
     ('load_post', _reset_session_state),
     ('undo_post', _reset_route_snapshot),
     ('redo_post', _reset_route_snapshot),
+    ('save_pre',  _save_masks_before_file_save),
 )
 
 

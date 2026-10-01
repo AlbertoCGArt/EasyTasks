@@ -51,20 +51,19 @@ All notable changes to Easy Tasks are recorded here.
   them all, so painting one paints all — the operator now says so rather than
   leaving it to be discovered.
 
-  The painted mask is written to disk when you leave paint mode, and the panel
-  says "Unsaved paint — renders blank" with a Save Painted Mask button whenever
-  it is dirty. Strokes live in memory until something writes them, and the file
-  on disk was the flat grey the mask was created with — so a render or a
-  reopened file read an unpainted mask and the blend looked like it had ignored
-  the painting entirely. Saving happens before packing, never after: packing a
-  dirty image packs the stale file and marks the buffer clean, which silently
-  destroys the strokes.
+  The painted mask is made durable when you leave paint mode through the panel
+  and every time the .blend is saved, however paint mode was left. Strokes live
+  in memory until something writes them, and a generated image is rebuilt from
+  its flat grey on every reload — so an unsaved mask renders blank and the
+  blend looks like it ignored the painting. In a saved .blend the mask goes to
+  `textures/`, named after both the .blend and the material so two files in
+  one folder cannot overwrite each other's painting; in a .blend that has never
+  been saved it is packed into the file. Saving happens before packing, never
+  after: packing a dirty file-backed image packs the stale file and marks the
+  buffer clean, silently destroying the strokes. The panel says "Unsaved paint
+  — renders blank" with a Save Painted Mask button whenever there is any.
 
-  Two failure modes worth naming, both found by writing the tests. Blender
-  declines to pack a generated image *silently* and rebuilds it from
-  `generated_color` on load, so the mask is written to `textures/` beside the
-  blend instead — otherwise painting would vanish on the next open. And
-  painting is pinned to that one image rather than the material's slot list,
+  Painting is pinned to that one image rather than the material's slot list,
   so a stray stroke cannot land on the Megascans albedo and overwrite the
   library file itself.
 

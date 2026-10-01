@@ -202,13 +202,15 @@ and remove instead of needing separate add/erase masks.
   name). Paint Mask says so when it finds the material on more than one object.
 - Switching between the two only moves the link. The layer you already painted
   stays in the node tree, so switching back brings that work with it.
-- The mask image is written to `textures/` next to your blend. Blender silently
-  refuses to pack a generated image and rebuilds it as flat grey on load, so
-  without that your paint would quietly vanish.
-- Leaving paint mode **saves the mask**. Strokes live in memory until something
-  writes them, so an unsaved mask renders blank however good it looks in the
-  viewport. The panel flags it and offers **Save Painted Mask** whenever there
-  is unsaved paint.
+- The mask is written to `textures/` next to your blend, named after both the
+  .blend and the material so two files in one folder never overwrite each
+  other's painting. In a .blend you haven't saved yet, it's packed into the
+  file instead, so nothing is lost either way.
+- The mask is **saved whenever it needs to be**: when you leave paint mode
+  through the panel, and every time you save the .blend, however you left paint
+  mode. Strokes live in memory until something writes them, so an unsaved mask
+  renders blank however good it looks in the viewport. The panel flags unsaved
+  paint and offers **Save Painted Mask** if you want to write it right away.
 - Painting targets that one image and nothing else, so a stray stroke can't
   land on the Megascans albedo and overwrite your library file.
 

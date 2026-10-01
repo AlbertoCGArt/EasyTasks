@@ -1812,8 +1812,11 @@ def paint_mask_creates_an_image_layer():
         "mask image left colour managed"
     # the pixels must exist somewhere other than generated_color, or the paint
     # is silently rebuilt as flat grey on the next load
-    on_disk = _os.path.join(_os.path.dirname(blend), "textures", node.image.name + ".png")
+    on_disk = et._mask_file_path(node.image)
+    assert _os.path.dirname(_os.path.dirname(on_disk)) == _os.path.dirname(blend), on_disk
     assert _os.path.isfile(on_disk), f"mask image was not written to {on_disk}"
+    assert _os.path.basename(on_disk).startswith("mask_test_"), \
+        f"mask file is not keyed by its .blend: {on_disk}"
     assert node.image.source == 'FILE', node.image.source
 
     # a second click must reuse that image rather than stacking another
@@ -2281,6 +2284,94 @@ def routing_ignores_library_collections():
 
 check("routing ignores library-linked collections",
       routing_ignores_library_collections)
+
+
+def _fresh_mask(name):
+    """A painted, generated mask image of the kind Paint Blend Mask creates."""
+    image = bpy.data.images.new(name, 16, 16, alpha=False)
+    image.generated_color = (0.5, 0.5, 0.5, 1.0)
+    image.use_fake_user = True                 # stand-in for the node using it
+    image.pixels.foreach_set([1.0, 1.0, 1.0, 1.0] * (16 * 16))
+    image.update()
+    return image
+
+
+def unsaved_blend_mask_can_still_be_kept():
+    """
+    The reported trap: a mask created before the .blend was ever saved had no
+    path, so Save Painted Mask failed forever and every instruction it gave led
+    back to the same failure. A painted generated image does pack, so pack it.
+    """
+    saved_path = bpy.data.filepath
+    image = _fresh_mask("UnsavedFile_Mask")
+    image.filepath_raw = ""
+    assert image.is_dirty and image.source == 'GENERATED'
+
+    # pretend the .blend has never been saved
+    real = et._blend_dir
+    et._blend_dir = lambda: ""
+    try:
+        assert et._save_blend_mask_image(image), "an unsaved-file mask was not kept"
+    finally:
+        et._blend_dir = real
+    assert image.packed_file is not None, "the paint was not packed into the .blend"
+    assert not image.is_dirty
+    assert abs(image.pixels[0] - 1.0) < 1e-6, "packing threw the paint away"
+    bpy.data.images.remove(image)
+    assert bpy.data.filepath == saved_path
+
+check("a mask painted in an unsaved .blend is still kept",
+      unsaved_blend_mask_can_still_be_kept)
+
+
+def mask_files_do_not_collide_between_blends():
+    """
+    The mask path was textures/<material>_Mask.png, so a second .blend in the
+    same folder with a material of the same name overwrote the first one's
+    painted mask without a word.
+    """
+    image = _fresh_mask("Floor_Blend_Mask")
+    real = et._blend_dir, et._blend_stem
+    folder = _os.path.dirname(bpy.data.filepath) or "C:/tmp"
+    try:
+        et._blend_dir, et._blend_stem = (lambda: folder), (lambda: "level_a")
+        first = et._mask_file_path(image)
+        et._blend_stem = lambda: "level_b"
+        second = et._mask_file_path(image)
+    finally:
+        et._blend_dir, et._blend_stem = real
+    assert first != second, f"two .blend files share one mask file: {first}"
+    assert _os.path.basename(_os.path.dirname(first)) == "textures", first
+
+    # names are cleaned for the filesystem
+    image.name = 'bad:name/with*chars?'
+    path = et._mask_file_path(image)
+    assert not any(ch in _os.path.basename(path) for ch in ':/*?'), path
+    bpy.data.images.remove(image)
+
+check("mask files are unique per .blend and safe to write",
+      mask_files_do_not_collide_between_blends)
+
+
+def masks_are_kept_on_ctrl_s():
+    """Leaving paint mode some other way and saving must not lose the paint."""
+    assert any(getattr(h, '__name__', '') == '_save_masks_before_file_save'
+               for h in bpy.app.handlers.save_pre), "no save_pre handler"
+
+    _ensure_object_mode()
+    wall  = bpy.data.objects["BlendWall"]
+    image = et._blend_paint_image(wall.active_material.node_tree.nodes[et._MASK_NODE_NAME])
+    assert image is not None
+    image.pixels.foreach_set([0.75, 0.75, 0.75, 1.0] * (image.size[0] * image.size[1]))
+    image.update()
+    assert image.is_dirty
+
+    et._save_masks_before_file_save(None)
+    assert not image.is_dirty, "a dirty mask was left unsaved through Ctrl+S"
+    image.reload()
+    assert abs(image.pixels[0] - 0.75) < 0.02, image.pixels[0]
+
+check("painted masks are saved along with the .blend", masks_are_kept_on_ctrl_s)
 
 
 # --- unregister ------------------------------------------------------------
