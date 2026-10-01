@@ -240,8 +240,10 @@ and **texel density** in pixels per metre.
 Density is the one worth having. Two walls at different densities show visibly
 different texture detail side by side, and nothing in Blender tells you before
 you render. Pick the texture size you intend to use, and it reports the range,
-the median, and any object more than 2× off it. Object scale counts, so a
-scaled-up asset reports the density it really renders at.
+the median, and any object more than 2× off it — change the size in the popup
+and the figures update. It measures the surface in world space, so a scaled or
+stretched asset reports the density it really renders at, and it reads the UV
+map your textures use even after you've painted a blend mask.
 
 ### Stacked UV Detector
 Finds objects sharing an identical UV layout and selects them, which is how

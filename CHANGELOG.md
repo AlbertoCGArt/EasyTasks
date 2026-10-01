@@ -18,9 +18,11 @@ All notable changes to Easy Tasks are recorded here.
   faces, layouts running past 0-1, and **texel density** in pixels per metre.
   Density is the one worth having — two walls at different densities show
   visibly different texture detail side by side and nothing in Blender says so
-  until you look at a render. Object scale is folded in, so a scaled-up object
-  reports the density it actually renders at, and objects more than 2x off the
-  median are named.
+  until you look at a render. Area is measured from world-space vertices, so a
+  scaled or non-uniformly stretched object reports the density it actually
+  renders at; it reads the render UV layer, not the paint mask's; the popup's
+  Texture Size re-quotes the figures; and it works from Edit Mode. Objects
+  more than 2x off the median are named.
 - **Blend Materials + Paint Mask.** Two PBR materials mixed through one shared
   mask, every channel at once. The mask starts from the base material's own
   height map, inverted and broken up by noise, so the overlay settles into the

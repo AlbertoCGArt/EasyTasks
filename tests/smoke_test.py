@@ -2584,6 +2584,62 @@ def paint_layer_choice_is_reachable():
 check("the paint layer choice is reachable", paint_layer_choice_is_reachable)
 
 
+def uv_health_measures_what_actually_renders():
+    """
+    Three wrong numbers from UV Health:
+      * after painting it measured the hidden paint layer (active) instead of
+        the texture UVs (active_render);
+      * it averaged object scale, so a (2, 1, 1) object read the wrong density
+        and showed up as a false outlier;
+      * the popup's Texture Size changed nothing, because density was computed
+        once with the size it opened at.
+    """
+    _ensure_object_mode()
+    quad = _uv_quad("HealthQuad", 1.0, 1.0, (60, 0, 0))
+    paint = quad.data.uv_layers.new(name=et._BLEND_PAINT_UV)
+    for datum in paint.data:
+        datum.uv = (datum.uv[0] * 0.1, datum.uv[1] * 0.1)   # very different layout
+    quad.data.uv_layers.active = paint
+    render = next(l for l in quad.data.uv_layers if l.active_render)
+    assert render.name == "UVMap"
+
+    report = et._uv_report(quad, 1024)
+    assert report['uv'] == "UVMap", f"measured '{report['uv']}', not the texture UVs"
+    assert abs(report['density'] - 1024.0) < 1.0, report['density']
+
+    # non-uniform scale: a 1 m quad stretched to 2 m x 1 m has 2 m² of surface
+    quad.scale = (2.0, 1.0, 1.0)
+    bpy.context.view_layer.update()
+    stretched = et._uv_report(quad, 1024)
+    expected = 1024.0 / (2.0 ** 0.5)
+    assert abs(stretched['density'] - expected) < 1.0, \
+        f"density {stretched['density']:.1f} under (2,1,1) scale, expected {expected:.1f}"
+
+    # the popup re-reads the size it shows
+    resized = et._uv_reports_at([stretched], 4096)
+    assert abs(resized[0]['density'] - expected * 4) < 4.0, resized[0]['density']
+    notes.append(f"uv health: {stretched['density']:.0f} px/m under (2,1,1) scale")
+
+check("uv health measures the UVs that render, at the real scale",
+      uv_health_measures_what_actually_renders)
+
+
+def uv_health_runs_in_edit_mode():
+    """It used to raise a traceback when started from Edit Mode."""
+    _ensure_object_mode()
+    quad = bpy.data.objects["HealthQuad"]
+    bpy.ops.object.select_all(action='DESELECT')
+    quad.select_set(True)
+    bpy.context.view_layer.objects.active = quad
+    bpy.ops.object.mode_set(mode='EDIT')
+    try:
+        assert bpy.ops.et.uv_health('EXEC_DEFAULT') == {'FINISHED'}
+    finally:
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+check("uv health runs in Edit Mode", uv_health_runs_in_edit_mode)
+
+
 # --- unregister ------------------------------------------------------------
 check("unregister()", et.unregister)
 

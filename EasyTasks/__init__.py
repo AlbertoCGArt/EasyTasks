@@ -5561,51 +5561,86 @@ def _uv_report(obj, texture_px=2048):
     if not polygons:
         return None
 
-    layer = mesh.uv_layers.active
+    layer = _texture_uv_layer(mesh)
     entry = {'name': obj.name, 'faces': len(polygons), 'layers':
              len(mesh.uv_layers), 'uv': layer.name if layer else None,
-             'density': 0.0, 'tiles': False, 'degenerate': 0, 'span': 0.0}
+             'density': 0.0, 'ratio': 0.0, 'tiles': False, 'degenerate': 0,
+             'span': 0.0, 'area': 0.0, 'uv_area': 0.0}
 
-    scale = obj.matrix_world.to_scale()
-    # Polygon areas are local, so scale them into world units before comparing
-    # against UV area — otherwise every scaled object reads as a different density.
-    factor = (abs(scale.x) + abs(scale.y) + abs(scale.z)) / 3.0
-    world_area = sum(poly.area for poly in polygons) * (factor ** 2)
-    entry['area'] = world_area
+    # Triangles once, then everything below is whole-array numpy: the old
+    # per-polygon Python walk took seconds on a dense scan.
+    mesh.calc_loop_triangles()
+    tris = mesh.loop_triangles
+    count = len(tris)
+    if not count:
+        return entry
+    tri_verts = np.empty(count * 3, dtype=np.int32)
+    tri_loops = np.empty(count * 3, dtype=np.int32)
+    tri_poly  = np.empty(count,     dtype=np.int32)
+    tris.foreach_get('vertices', tri_verts)
+    tris.foreach_get('loops', tri_loops)
+    tris.foreach_get('polygon_index', tri_poly)
 
-    if layer is None:
+    # World-space area from transformed vertices. Averaging the object's scale
+    # read a (2, 1, 1) object as 1.33x everywhere instead of 2x along one axis,
+    # so non-uniformly scaled objects got the wrong density and showed up as
+    # outliers they were not.
+    co = np.empty(len(mesh.vertices) * 3, dtype=np.float64)
+    mesh.vertices.foreach_get('co', co)
+    matrix = np.array(obj.matrix_world, dtype=np.float64)
+    world = co.reshape(-1, 3) @ matrix[:3, :3].T + matrix[:3, 3]
+    p = world[tri_verts].reshape(count, 3, 3)
+    world_area = 0.5 * np.linalg.norm(
+        np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0]), axis=1).sum()
+    entry['area'] = float(world_area)
+
+    # No layer, or one whose loop data is not available (Edit Mode keeps it in
+    # the BMesh): report what is known rather than raising on an empty array.
+    if layer is None or len(layer.data) != len(mesh.loops):
         return entry
 
-    count = len(layer.data)
-    flat  = [0.0] * (count * 2)
-    layer.data.foreach_get('uv', flat)
-    us, vs = flat[0::2], flat[1::2]
-    entry['span']  = max(max(us) - min(us), max(vs) - min(vs))
-    entry['tiles'] = (min(us) < -0.001 or max(us) > 1.001
-                      or min(vs) < -0.001 or max(vs) > 1.001)
+    uv = np.empty(len(layer.data) * 2, dtype=np.float64)
+    layer.data.foreach_get('uv', uv)
+    uv = uv.reshape(-1, 2)
+    low, high = uv.min(axis=0), uv.max(axis=0)
+    entry['span']  = float((high - low).max())
+    entry['tiles'] = bool((low < -0.001).any() or (high > 1.001).any())
 
-    uv_area = 0.0
-    for poly in polygons:
-        start, total = poly.loop_start, poly.loop_total
-        if total < 3:
-            continue
-        # fan triangulation, twice the signed area by the shoelace formula
-        first = start
-        area = 0.0
-        for offset in range(1, total - 1):
-            ax, ay = flat[first * 2],              flat[first * 2 + 1]
-            bx, by = flat[(start + offset) * 2],   flat[(start + offset) * 2 + 1]
-            cx, cy = flat[(start + offset + 1) * 2], flat[(start + offset + 1) * 2 + 1]
-            area += abs((bx - ax) * (cy - ay) - (cx - ax) * (by - ay)) * 0.5
-        if area <= 1e-12:
-            entry['degenerate'] += 1
-        uv_area += area
-
+    t  = uv[tri_loops].reshape(count, 3, 2)
+    e1 = t[:, 1] - t[:, 0]
+    e2 = t[:, 2] - t[:, 0]
+    tri_uv = 0.5 * np.abs(e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0])
+    per_poly = np.bincount(tri_poly, weights=tri_uv, minlength=len(polygons))
+    entry['degenerate'] = int((per_poly <= 1e-12).sum())
+    uv_area = float(tri_uv.sum())
     entry['uv_area'] = uv_area
+
     if world_area > 1e-9 and uv_area > 1e-12:
-        # pixels per metre, given a square texture of texture_px
-        entry['density'] = (uv_area ** 0.5) * texture_px / (world_area ** 0.5)
+        # Density per texture pixel, kept separately so the popup can rescale
+        # it when Texture Size changes without measuring everything again.
+        entry['ratio']   = (uv_area / world_area) ** 0.5
+        entry['density'] = entry['ratio'] * texture_px
     return entry
+
+
+def _texture_uv_layer(mesh):
+    """
+    The UV layer the textures render with: the active *render* layer, never
+    the paint mask's own. Painting makes ET_BlendPaintUV the active layer, so
+    measuring 'active' reported the paint layout instead of the texture one.
+    """
+    layers = mesh.uv_layers
+    render = next((l for l in layers if l.active_render
+                   and l.name != _BLEND_PAINT_UV), None)
+    if render is not None:
+        return render
+    return next((l for l in layers if l.name != _BLEND_PAINT_UV), None) \
+        or layers.active
+
+
+def _uv_reports_at(reports, texture_px):
+    """The same measurements with density quoted for another texture size."""
+    return [dict(r, density=r['ratio'] * texture_px) for r in reports]
 
 
 def _uv_findings(reports):
@@ -5682,9 +5717,20 @@ class ET_OT_UVHealth(bpy.types.Operator):
         return context.window_manager.invoke_popup(self, width=460)
 
     def _gather(self, context):
-        size = int(self.texture_px)
-        reports = [_uv_report(o, size) for o in context.selected_objects
-                   if o.type == 'MESH']
+        size    = int(self.texture_px)
+        meshes  = [o for o in context.selected_objects if o.type == 'MESH']
+        # In Edit Mode the geometry and UVs live in the BMesh; the mesh
+        # datablock's loop UVs read back empty even after
+        # update_from_editmode(), and measuring them raised. Step out for the
+        # measurement and straight back in.
+        was_editing = context.mode == 'EDIT_MESH'
+        if was_editing:
+            bpy.ops.object.mode_set(mode='OBJECT')
+        try:
+            reports = [_uv_report(o, size) for o in meshes]
+        finally:
+            if was_editing:
+                bpy.ops.object.mode_set(mode='EDIT')
         self._reports  = [r for r in reports if r]
         self._findings = _uv_findings(self._reports)
 
@@ -5708,18 +5754,24 @@ class ET_OT_UVHealth(bpy.types.Operator):
         box.label(text="UV Health", icon='UV')
         box.prop(self, 'texture_px')
 
+        # Re-quote at whatever size is picked now. The measurements were taken
+        # once in invoke; only the pixels-per-metre figure depends on the size,
+        # and before this the dropdown changed nothing on screen.
+        reports  = _uv_reports_at(self._reports, int(self.texture_px))
+        findings = _uv_findings(reports)
+
         icons = {'ERROR': 'ERROR', 'WARNING': 'ERROR', 'INFO': 'INFO',
                  'OK': 'CHECKMARK'}
         col = box.column(align=True)
-        for level, message in self._findings:
+        for level, message in findings:
             col.label(text=message, icon=icons.get(level, 'INFO'))
 
-        if not self._reports:
+        if not reports:
             return
         box = layout.box()
-        box.label(text=f"{len(self._reports)} object(s)", icon='OBJECT_DATA')
+        box.label(text=f"{len(reports)} object(s)", icon='OBJECT_DATA')
         col = box.column(align=True)
-        for entry in sorted(self._reports,
+        for entry in sorted(reports,
                             key=lambda r: r['density'], reverse=True)[:12]:
             uv = entry['uv'] or "no UV map"
             col.label(text=f"{entry['name']:<24} {entry['density']:>7.0f} px/m   "
