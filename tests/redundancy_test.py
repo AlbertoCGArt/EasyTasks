@@ -57,10 +57,18 @@ def collect(node):
     for sub in ast.walk(node):
         if (isinstance(sub, ast.Call)
                 and isinstance(sub.func, ast.Attribute)
-                and sub.func.attr in ("operator", "menu")
+                # operator_menu_enum draws one operator as a dropdown of its
+                # enum values — a real UI route, and the only sane widget for
+                # something like a preset list.
+                and sub.func.attr in ("operator", "menu", "operator_menu_enum")
                 and sub.args
                 and isinstance(sub.args[0], ast.Constant)):
             ident = sub.args[0].value
+            # Every entry in the dropdown is the same call site, so it can
+            # never be a duplicate button the way a plain .operator() can.
+            if sub.func.attr == "operator_menu_enum":
+                out.append(("op", ident, True))
+                continue
             prop = prop_of.get(id(sub))
             if prop is None:
                 key, dynamic = ident, False

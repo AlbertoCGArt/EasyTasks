@@ -49,7 +49,10 @@ else:
 
 # --- settings properties referenced by the panel ---------------------------
 settings = bpy.context.scene.et_semantic
-referenced = set(re.findall(r"settings,\s*'(\w+)'", source))
+# \b so this only picks up the panels' bare `settings` variable — without it,
+# any `getattr(tool_settings, 'image_paint')` elsewhere reads as a missing
+# et_semantic property.
+referenced = set(re.findall(r"\bsettings,\s*'(\w+)'", source))
 missing = sorted(p for p in referenced if not hasattr(settings, p))
 print(f"{len(referenced)} settings properties referenced by the UI")
 if missing:

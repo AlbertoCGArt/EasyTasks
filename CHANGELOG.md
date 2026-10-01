@@ -2,6 +2,141 @@
 
 All notable changes to Easy Tasks are recorded here.
 
+## [Unreleased]
+
+### Added
+- **Blend presets.** Seven starting points for the mask — Dirt in Crevices,
+  Puddles, Grime up a Wall, Snow on Top, Settled Dust, Moss, Streaks from Above
+  — covering amount, softness, noise and the whole direction setup. The useful
+  values here are not guessable; each of these took a round of trial and error
+  to find. Available in the Blend Materials dialog, and from the Blend Mask
+  panel as a dropdown that loads onto the material already on the object, so
+  changing your mind costs nothing and keeps whatever you have painted.
+
+- **UV Health Check.** Measures the selection for the things that quietly stop
+  a texture or a paint mask behaving: objects with no UV map, zero-area UV
+  faces, layouts running past 0-1, and **texel density** in pixels per metre.
+  Density is the one worth having — two walls at different densities show
+  visibly different texture detail side by side and nothing in Blender says so
+  until you look at a render. Object scale is folded in, so a scaled-up object
+  reports the density it actually renders at, and objects more than 2x off the
+  median are named.
+- **Blend Materials + Paint Mask.** Two PBR materials mixed through one shared
+  mask, every channel at once. The mask starts from the base material's own
+  height map, inverted and broken up by noise, so the overlay settles into the
+  low spots the way dirt actually does — believable before you touch a slider.
+  Amount, Softness, Noise Scale and Paint Influence live on one node group,
+  shared logic with per-material values.
+
+  **Paint Mask** is the manual half: white adds the overlay, black scrubs it
+  back, `X` swaps. Mid grey is the neutral value, which is what lets a single
+  painted layer both add and remove rather than needing two masks. It paints an
+  image by default, or a vertex colour layer when the object has no UVs, and
+  switching between them only moves the link — the layer you already painted
+  stays in the tree, so switching back brings the work with it.
+
+  Painting goes through a UV layer of its own. A tiling surface carries UVs
+  running well past 0-1 so the textures repeat, which is right for them and
+  fatal for a mask: every tile shares the same wrapped pixels, so one stroke
+  appears in all of them at once. A copy of the layout scaled into 0-1 is added
+  as `ET_BlendPaintUV`, wired to the mask through a UV Map node and made the
+  active layer for painting. The textures keep the tiled layer untouched, since
+  they read the active *render* UV map and painting uses the active one. A mesh
+  whose UVs already sit inside 0-1 gets no extra layer.
+
+  Because that layer is looked up by name, every object on the material gets
+  it, not only the one paint mode was entered on. Otherwise a floor built from
+  many planes sharing one blend rendered paint on exactly one of them and
+  silently nothing on the rest. Sharing still means one mask image between
+  them all, so painting one paints all — the operator now says so rather than
+  leaving it to be discovered.
+
+  The painted mask is written to disk when you leave paint mode, and the panel
+  says "Unsaved paint — renders blank" with a Save Painted Mask button whenever
+  it is dirty. Strokes live in memory until something writes them, and the file
+  on disk was the flat grey the mask was created with — so a render or a
+  reopened file read an unpainted mask and the blend looked like it had ignored
+  the painting entirely. Saving happens before packing, never after: packing a
+  dirty image packs the stale file and marks the buffer clean, which silently
+  destroys the strokes.
+
+  Two failure modes worth naming, both found by writing the tests. Blender
+  declines to pack a generated image *silently* and rebuilds it from
+  `generated_color` on load, so the mask is written to `textures/` beside the
+  blend instead — otherwise painting would vanish on the next open. And
+  painting is pinned to that one image rather than the material's slot list,
+  so a stray stroke cannot land on the Megascans albedo and overwrite the
+  library file itself.
+
+  Channels only one side has pass straight through instead of being mixed
+  against a flat colour that would wash them out.
+
+  The blend is a new material; the two sources are read and never written. It
+  lands on the slots the object's faces actually use, and only those still
+  holding a source — writing to slot 0 meant an object carrying both materials
+  kept rendering whichever slot its faces were on, so the blend appeared to do
+  nothing, while replacing every slot stripped both sources off the object.
+  Unused slots keep their material, and a re-run takes the active slot so the
+  object follows the new blend instead of being left on the old one.
+  Assignment goes through `material_slots`, which also respects a slot linked
+  to the object rather than the mesh.
+
+- **ET: Blend Mask panel.** Appears in the sidebar whenever the active material
+  carries a blend, with every mask control live on the node itself — Amount,
+  Softness, Noise, axis buttons, Gradient/Face Angle, Strength, Falloff, Paint
+  Influence, and the paint toggle. Re-opening the dialog to change your mind
+  built a second material and orphaned the mask you had painted; this edits the
+  material already in front of you and creates nothing.
+
+- **Directional blending**, in two modes. Pick an axis — the end the overlay
+  builds toward — then how the direction is read:
+
+  **Gradient** (the default) ramps the overlay along that axis, a full 0 to 100
+  across the mesh: grime climbing a wall, moss up a trunk. It uses normalised
+  bounding-box coordinates, so it holds at any scale and follows the object
+  when moved or duplicated. **Face Angle** restricts the overlay to faces
+  pointing that way — snow on a rock — reading the true world-space normal.
+
+  Face Angle cannot produce a transition on a flat surface: every face there
+  shares one normal, so it can only shift the whole surface at once. That is
+  what Gradient exists for, and why it is the default. Choosing Face Angle
+  where nothing points the chosen way now reports a warning rather than leaving
+  an invisible overlay.
+
+  The direction scales the *finished* mask rather than the raw height feeding
+  it. Gating before the Amount/Softness threshold squeezed the ramp into
+  whatever band the threshold left, so it could reach neither none of the
+  overlay nor all of it — a gradient that could not actually run 0 to 100.
+  Paint is applied after the gate, so a hand stroke still wins. Left at Any
+  nothing changes, which is what keeps earlier materials identical.
+
+  The mask group is rebuilt beside an older one rather than reused when the
+  sockets do not match, so opening a file saved by the previous version leaves
+  its materials exactly as they were.
+- **Megascans Material.** A button, a file browser, and every texture set in the
+  folder comes back as a wired Principled BSDF. It parses the naming Bridge
+  actually writes — `Rock_Cliff_ug0jaipaw_4K_Normal_LOD0` — so the asset id,
+  resolution and LOD tag stay out of the material name, and it reads ordinary
+  `BaseColor`/`Normal`/`Rough` sets from anywhere else too.
+
+  Base colour, roughness, metallic, specular and alpha go to their sockets with
+  data maps set to Non-Color; the normal goes through a Normal Map node with
+  height chained *after* it in a Bump node, so detail rides on the normal map
+  rather than replacing it. Gloss is inverted into roughness, DirectX normals
+  get their green channel flipped, and packed ORM/RMA maps are split into three
+  channels. Height can go to the Material Output as true displacement instead.
+
+  Two things it declines to do quietly: AO is loaded but only multiplied into
+  base colour on request, since a renderer that computes occlusion would then
+  double-darken; and translucency, cavity and curvature are loaded and labelled
+  but left unconnected, because what they should drive is a per-shader call.
+
+  Where a folder ships 2K and 4K side by side it picks one deliberately —
+  highest by default, lowest on request — rather than whichever the OS listed
+  last, and re-running over the same folder reuses the material instead of
+  leaving a `.001` behind.
+
+
 ## [2.5.0]
 
 ### Changed

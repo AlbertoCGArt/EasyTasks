@@ -692,6 +692,9 @@ class ET_MT_FavToolsMenu(bpy.types.Menu):
         layout.operator('et.scene_stats',           text='Scene Statistics',      icon='INFO')
         layout.separator()
         layout.operator('et.generate_lods',         text='Generate LODs',         icon='MOD_DECIM')
+        layout.operator('et.megascans_material',    text='Megascans Material',    icon='NODE_MATERIAL')
+        layout.operator('et.blend_materials',       text='Blend Materials',       icon='MOD_MASK')
+        layout.operator('et.paint_blend_mask',      text='Paint Blend Mask',      icon='BRUSH_DATA')
         layout.operator('et.consolidate_materials', text='Consolidate Materials', icon='MATERIAL')
         layout.operator('et.place_reference_image', text='Place Reference Image', icon='IMAGE_REFERENCE')
         layout.separator()
@@ -2055,6 +2058,1959 @@ class ET_OT_ConsolidateMaterials(bpy.types.Operator):
 
 
 # ---------------------------------------------------------------------------
+# PBR material builder  (Quixel Megascans and any standard map naming)
+# ---------------------------------------------------------------------------
+
+_IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.exr', '.tga',
+               '.bmp', '.webp'}
+
+# Filename tokens that name the map, separators stripped and lowercased, so
+# 'Base_Color', 'BaseColor' and 'basecolor' are all one lookup.
+_TEX_KEYWORDS = {
+    'albedo': 'BASE', 'basecolor': 'BASE', 'basecolour': 'BASE',
+    'diffuse': 'BASE', 'diff': 'BASE', 'color': 'BASE', 'colour': 'BASE',
+    'col': 'BASE', 'albedotransparency': 'BASE',
+    'roughness': 'ROUGH', 'rough': 'ROUGH', 'rgh': 'ROUGH',
+    'gloss': 'GLOSS', 'glossiness': 'GLOSS', 'glossy': 'GLOSS',
+    'normal': 'NORMAL', 'normalgl': 'NORMAL', 'normalopengl': 'NORMAL',
+    'normalmap': 'NORMAL', 'nrm': 'NORMAL', 'nor': 'NORMAL',
+    'normaldx': 'NORMAL_DX', 'normaldirectx': 'NORMAL_DX',
+    'metalness': 'METAL', 'metallic': 'METAL', 'metal': 'METAL',
+    'displacement': 'DISP', 'disp': 'DISP', 'height': 'DISP',
+    'bump': 'BUMP', 'normalbump': 'BUMP',
+    'ao': 'AO', 'ambientocclusion': 'AO', 'occlusion': 'AO',
+    'opacity': 'ALPHA', 'alpha': 'ALPHA', 'transparency': 'ALPHA',
+    'specular': 'SPEC', 'spec': 'SPEC',
+    'orm': 'ORM', 'arm': 'ORM', 'occlusionroughnessmetallic': 'ORM',
+    'rma': 'RMA',
+    # Loaded and labelled, but deliberately left unconnected: what these should
+    # drive is a per-shader judgement call (translucency into subsurface,
+    # cavity into a mask) that a one-click importer should not make silently.
+    'translucency': 'EXTRA', 'transmission': 'EXTRA', 'thickness': 'EXTRA',
+    'cavity': 'EXTRA', 'curvature': 'EXTRA', 'fuzz': 'EXTRA',
+    'scatter': 'EXTRA', 'brush': 'EXTRA',
+}
+
+# What each channel of a packed map means, in R, G, B order.
+_PACKED_CHANNELS = {
+    'ORM': ('AO', 'ROUGH', 'METAL'),
+    'RMA': ('ROUGH', 'METAL', 'AO'),
+}
+
+# Tokens that sit *behind* the map name and have to come off before matching:
+# Megascans writes 'Rock_ug0jaipaw_4K_Normal_LOD0'.
+_TRAILING_JUNK = {'srgb', 'raw', 'preview'}
+_RES_RE     = re.compile(r'^(\d+)k$', re.I)
+_LOD_RE     = re.compile(r'^lod\d+$', re.I)
+_SKIP_WORDS = ('preview', 'thumb', 'billboard')
+
+# Tie-break when a folder ships the same map twice: prefer the encoding that
+# survives an 8-bit gradient, which matters most for displacement and normals.
+_EXT_RANK = {'.exr': 4, '.tif': 3, '.tiff': 3, '.png': 2, '.tga': 1,
+             '.bmp': 1, '.webp': 0, '.jpg': 0, '.jpeg': 0}
+
+# Top-to-bottom order of the texture column, so every material this builds
+# reads the same way.
+_SLOT_ORDER = ('BASE', 'ORM', 'RMA', 'AO', 'ROUGH', 'GLOSS', 'METAL', 'SPEC',
+               'NORMAL', 'NORMAL_DX', 'BUMP', 'DISP', 'ALPHA')
+
+
+def _split_texture_name(stem):
+    """
+    Split a texture filename stem into (base_name, slot, resolution).
+
+    Megascans puts the map keyword last, after the resolution and sometimes
+    before an LOD tag — 'Rock_Cliff_ug0jaipaw_4K_Normal_LOD0'. So walk in from
+    the right: drop the tags nothing keys off, then try the last two tokens
+    joined before the last token alone, which is what makes 'Base_Color' and
+    'BaseColor' the same lookup.
+
+    slot is None when no keyword matched, i.e. not a texture we can place.
+    """
+    tokens = [t for t in re.split(r'[^A-Za-z0-9]+', stem) if t]
+
+    while tokens and (_LOD_RE.match(tokens[-1])
+                      or tokens[-1].lower() in _TRAILING_JUNK):
+        tokens.pop()
+
+    slot = None
+    for span in (2, 1):
+        if len(tokens) < span:
+            continue
+        key   = ''.join(tokens[-span:]).lower()
+        found = _TEX_KEYWORDS.get(key)
+        if found:
+            # Extras keep their own key so two of them can't overwrite each other.
+            slot = f'EXTRA_{key}' if found == 'EXTRA' else found
+            del tokens[-span:]
+            break
+
+    res  = 0
+    kept = []
+    for token in tokens:
+        match = _RES_RE.match(token)
+        if match:
+            res = int(match.group(1))
+        else:
+            kept.append(token)
+
+    return '_'.join(kept), slot, res
+
+
+def _collect_texture_sets(paths, prefer_high=True):
+    """
+    Group texture files into {material_name: {slot: filepath}}.
+
+    A Bridge export folder often holds 2K and 4K side by side; both reduce to
+    the same base name, so the resolution decides which one wins rather than
+    whichever the OS happened to list last.
+    """
+    sets = {}
+    for path in paths:
+        stem, ext = os.path.splitext(os.path.basename(path))
+        ext = ext.lower()
+        if ext not in _IMAGE_EXTS:
+            continue
+        if any(word in stem.lower() for word in _SKIP_WORDS):
+            continue
+
+        base, slot, res = _split_texture_name(stem)
+        if slot is None:
+            continue
+        if not base:
+            # 'Albedo.jpg' — the folder is the only name we have.
+            base = os.path.basename(os.path.dirname(path)) or 'Material'
+
+        slots   = sets.setdefault(base, {})
+        rank    = (res if prefer_high else -res, _EXT_RANK.get(ext, 0))
+        current = slots.get(slot)
+        if current is None or rank > current[1]:
+            slots[slot] = (path, rank)
+
+    return {base: {slot: entry[0] for slot, entry in slots.items()}
+            for base, slots in sets.items()}
+
+
+def _image_key(path):
+    """Comparable absolute form of a texture path."""
+    try:
+        return os.path.normcase(os.path.abspath(bpy.path.abspath(path)))
+    except (ValueError, RuntimeError):
+        return None
+
+
+def _index_images():
+    """{path: image name} over everything currently loaded."""
+    index = {}
+    for img in bpy.data.images:
+        if not img.filepath:
+            continue
+        key = _image_key(img.filepath)
+        if key is not None:
+            index.setdefault(key, img.name)
+    return index
+
+
+def _load_image(path, index=None):
+    """
+    Load a texture, reusing an image datablock already pointing at it.
+
+    Scanning bpy.data.images per texture is quadratic once a library import is
+    loading hundreds of files into a scene that already holds hundreds, so the
+    builders pass an index in and it is kept up to date as images arrive.
+    """
+    key = _image_key(path)
+    if index is not None and key is not None:
+        existing = bpy.data.images.get(index.get(key, ""))
+        # A name can go stale if the datablock was renamed or removed.
+        if existing is not None and _image_key(existing.filepath) == key:
+            return existing
+        image = bpy.data.images.load(path)
+        index[key] = image.name
+        return image
+
+    for img in bpy.data.images:
+        if img.filepath and _image_key(img.filepath) == key:
+            return img
+    return bpy.data.images.load(path)
+
+
+def _set_non_color(image):
+    """Data maps must not be colour managed. The space name varies by config."""
+    for name in ('Non-Color', 'Non-Colour', 'Raw', 'Generic Data', 'Utility - Raw'):
+        try:
+            image.colorspace_settings.name = name
+            return
+        except TypeError:
+            continue
+
+
+def _socket(node, *names):
+    """First input socket that exists under any of these names, or None."""
+    for name in names:
+        sock = node.inputs.get(name)
+        if sock is not None:
+            return sock
+    return None
+
+
+def _new_mix(nodes, blend_type='MIX'):
+    """
+    A colour mix node, across the 3.4 Mix rework.
+
+    Returns (node, factor, input_a, input_b, output). Sockets are found by name
+    and type rather than index because 4.0 added rotation sockets to
+    ShaderNodeMix, which shifted every index after the float pair.
+    """
+    if hasattr(bpy.types, 'ShaderNodeMix'):
+        node = nodes.new('ShaderNodeMix')
+        node.data_type  = 'RGBA'
+        node.blend_type = blend_type
+        factor    = next(s for s in node.inputs
+                         if s.name == 'Factor' and s.type == 'VALUE')
+        colour_in = [s for s in node.inputs if s.type == 'RGBA']
+        result    = next(s for s in node.outputs if s.type == 'RGBA')
+        return node, factor, colour_in[0], colour_in[1], result
+
+    node = nodes.new('ShaderNodeMixRGB')
+    node.blend_type = blend_type
+    return node, node.inputs[0], node.inputs[1], node.inputs[2], node.outputs[0]
+
+
+def _new_separate_color(nodes):
+    """Separate Color, or the pre-3.3 Separate RGB. Returns (node, [r, g, b])."""
+    if hasattr(bpy.types, 'ShaderNodeSeparateColor'):
+        node = nodes.new('ShaderNodeSeparateColor')
+    else:
+        node = nodes.new('ShaderNodeSeparateRGB')
+    return node, [node.outputs[i] for i in range(3)]
+
+
+def _flip_normal_green(nodes, links, source, location):
+    """
+    A DirectX normal map is an OpenGL one with green inverted.
+
+    Two Vector Math nodes do it — (r, -g, b) then + (0, 1, 0) — and both exist
+    unchanged in every Blender this add-on supports, where Separate/Combine
+    Color were renamed in 3.3.
+    """
+    flip = nodes.new('ShaderNodeVectorMath')
+    flip.operation = 'MULTIPLY'
+    flip.location  = location
+    flip.inputs[1].default_value = (1.0, -1.0, 1.0)
+    links.new(source, flip.inputs[0])
+
+    shift = nodes.new('ShaderNodeVectorMath')
+    shift.operation = 'ADD'
+    shift.location  = (location[0] + 190, location[1])
+    shift.inputs[1].default_value = (0.0, 1.0, 0.0)
+    links.new(flip.outputs['Vector'], shift.inputs[0])
+    return shift.outputs['Vector']
+
+
+def _set_alpha_blend(mat):
+    """Turn on transparency, across the 4.2 EEVEE Next render-method rework."""
+    if hasattr(mat, 'surface_render_method'):
+        mat.surface_render_method = 'BLENDED'
+        return
+    for value in ('HASHED', 'BLEND'):
+        try:
+            mat.blend_method = value
+            break
+        except TypeError:
+            continue
+    if hasattr(mat, 'shadow_method'):
+        try:
+            mat.shadow_method = 'HASHED'
+        except TypeError:
+            pass
+
+
+def _set_displacement_method(mat, method):
+    """displacement_method moved off mat.cycles onto the material in 4.1."""
+    try:
+        if hasattr(mat, 'displacement_method'):
+            mat.displacement_method = method
+        elif hasattr(mat, 'cycles'):
+            mat.cycles.displacement_method = method
+    except (AttributeError, TypeError):
+        pass
+
+
+def _add_mapping(nodes, links, x=-2000):
+    """Texture Coordinate ▸ Mapping, so a whole set tiles from one node."""
+    coord = nodes.new('ShaderNodeTexCoord')
+    coord.location = (x - 200, 0)
+    mapping = nodes.new('ShaderNodeMapping')
+    mapping.location = (x, 0)
+    links.new(coord.outputs['UV'], mapping.inputs['Vector'])
+    return mapping
+
+
+def _texture_column(nodes, links, slots, x, y_top, mapping=None, index=None):
+    """Lay one texture set out as a column. Returns {slot: image node}."""
+    order  = [s for s in _SLOT_ORDER if s in slots]
+    order += sorted(s for s in slots if s not in _SLOT_ORDER)
+
+    tex = {}
+    y   = y_top
+    for slot in order:
+        node = nodes.new('ShaderNodeTexImage')
+        node.image    = _load_image(slots[slot], index)
+        node.label    = slot.replace('EXTRA_', '').replace('_', ' ').title()
+        node.location = (x, y)
+        node.width    = 260
+        if slot != 'BASE':
+            _set_non_color(node.image)
+        if mapping is not None:
+            links.new(mapping.outputs['Vector'], node.inputs['Vector'])
+        tex[slot] = node
+        y -= 300
+    return tex
+
+
+def _canonical_sources(nodes, links, tex):
+    """
+    Reduce a texture set to canonical slots, each feeding a real socket.
+
+    Packed maps are split, gloss is inverted into roughness and DirectX
+    normals are flipped *here* rather than at wiring time, so that a blend of
+    two sets mixes like with like — a gloss-based set against a roughness-based
+    one still lines up. Returns ({slot: output socket}, [what was converted]).
+    """
+    source, notes = {}, []
+
+    for packed, meaning in _PACKED_CHANNELS.items():
+        node = tex.get(packed)
+        if node is None:
+            continue
+        sep, outs = _new_separate_color(nodes)
+        sep.location = (node.location.x + 320, node.location.y)
+        links.new(node.outputs['Color'], sep.inputs[0])
+        for out, target in zip(outs, meaning):
+            source.setdefault(target, out)
+        notes.append(f'{packed} split')
+
+    for slot, node in tex.items():
+        source.setdefault(slot, node.outputs['Color'])
+
+    if 'ROUGH' not in source and 'GLOSS' in tex:
+        node   = tex['GLOSS']
+        invert = nodes.new('ShaderNodeInvert')
+        invert.location = (node.location.x + 320, node.location.y)
+        invert.label    = "Gloss to Roughness"
+        links.new(node.outputs['Color'],
+                  _socket(invert, 'Color') or invert.inputs[1])
+        source['ROUGH'] = invert.outputs[0]
+        notes.append('gloss inverted')
+
+    if 'NORMAL' not in source and 'NORMAL_DX' in tex:
+        node = tex['NORMAL_DX']
+        source['NORMAL'] = _flip_normal_green(
+            nodes, links, node.outputs['Color'],
+            (node.location.x + 320, node.location.y))
+        notes.append('DirectX normal flipped')
+
+    # A Megascans '_Bump' map stands in for height when no displacement shipped.
+    if 'DISP' not in source and 'BUMP' in source:
+        source['DISP'] = source['BUMP']
+
+    return source, notes
+
+
+def _wire_principled(nodes, links, mat, bsdf, output, source,
+                     use_ao=False, displacement='BUMP', displacement_scale=0.1):
+    """Connect canonical sources to a Principled BSDF. Returns what it wired."""
+    wired = []
+
+    base_out = source.get('BASE')
+    if base_out is not None:
+        ao_out = source.get('AO')
+        if use_ao and ao_out is not None:
+            mix, fac, mix_a, mix_b, mix_out = _new_mix(nodes, 'MULTIPLY')
+            mix.location = (-20, 300)
+            mix.label    = "AO"
+            fac.default_value = 1.0
+            links.new(base_out, mix_a)
+            links.new(ao_out, mix_b)
+            base_out = mix_out
+            wired.append('AO')
+        links.new(base_out, bsdf.inputs['Base Color'])
+        wired.append('base colour')
+
+    for slot, socket_name, label in (('ROUGH', 'Roughness', 'roughness'),
+                                     ('METAL', 'Metallic',  'metallic')):
+        out = source.get(slot)
+        if out is not None:
+            links.new(out, bsdf.inputs[socket_name])
+            wired.append(label)
+
+    spec_out = source.get('SPEC')
+    spec_in  = _socket(bsdf, 'Specular IOR Level', 'Specular')
+    if spec_out is not None and spec_in is not None:
+        links.new(spec_out, spec_in)
+        wired.append('specular')
+
+    alpha_out = source.get('ALPHA')
+    if alpha_out is not None:
+        links.new(alpha_out, bsdf.inputs['Alpha'])
+        _set_alpha_blend(mat)
+        wired.append('alpha')
+
+    # Normal first, then bump on top of it: the Bump node takes the normal as
+    # its own input, so height detail rides on the normal map rather than
+    # replacing it.
+    normal_out = None
+    normal_src = source.get('NORMAL')
+    if normal_src is not None:
+        nmap = nodes.new('ShaderNodeNormalMap')
+        nmap.location = (0, -520)
+        links.new(normal_src, nmap.inputs['Color'])
+        normal_out = nmap.outputs['Normal']
+        wired.append('normal')
+
+    height_out = source.get('DISP')
+
+    if height_out is not None and displacement == 'BUMP':
+        bump = nodes.new('ShaderNodeBump')
+        bump.location = (140, -560)
+        bump.inputs['Distance'].default_value = displacement_scale
+        links.new(height_out, bump.inputs['Height'])
+        if normal_out is not None:
+            links.new(normal_out, bump.inputs['Normal'])
+        normal_out = bump.outputs['Normal']
+        wired.append('height as bump')
+
+    elif height_out is not None and displacement == 'DISPLACEMENT':
+        disp = nodes.new('ShaderNodeDisplacement')
+        disp.location = (300, -700)
+        disp.inputs['Midlevel'].default_value = 0.5
+        disp.inputs['Scale'].default_value    = displacement_scale
+        links.new(height_out, disp.inputs['Height'])
+        links.new(disp.outputs['Displacement'], output.inputs['Displacement'])
+        _set_displacement_method(mat, 'BOTH')
+        wired.append('true displacement')
+
+    if normal_out is not None:
+        links.new(normal_out, bsdf.inputs['Normal'])
+
+    return wired
+
+
+def _new_shader_material(name):
+    """An empty material with just a Principled and an Output. (mat, nodes, links, bsdf, output)"""
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    nodes.clear()
+
+    output = nodes.new('ShaderNodeOutputMaterial')
+    output.location = (640, 0)
+    bsdf = nodes.new('ShaderNodeBsdfPrincipled')
+    bsdf.location = (280, 0)
+    links.new(bsdf.outputs['BSDF'], output.inputs['Surface'])
+    return mat, nodes, links, bsdf, output
+
+
+def _build_pbr_material(name, slots, use_ao=False, use_mapping=True,
+                        displacement='BUMP', displacement_scale=0.1, index=None):
+    """
+    Wire one texture set into a Principled BSDF.
+
+    Returns (material, [what was connected]) — the second half is what the
+    operator prints, so a set that arrives half-named is visible rather than
+    silently producing a flat grey material.
+    """
+    mat, nodes, links, bsdf, output = _new_shader_material(name)
+
+    mapping = _add_mapping(nodes, links, -1180) if use_mapping else None
+    tex     = _texture_column(nodes, links, slots, -820,
+                              300 * (len(slots) - 1) // 2, mapping, index)
+    source, notes = _canonical_sources(nodes, links, tex)
+
+    wired = _wire_principled(nodes, links, mat, bsdf, output, source,
+                             use_ao=use_ao, displacement=displacement,
+                             displacement_scale=displacement_scale)
+    return mat, notes + wired
+
+
+def _assign_material(obj, mat):
+    """
+    Put mat in the object's first slot. True when the object can hold one.
+
+    Through material_slots, like _replace_materials: a slot linked to the
+    object renders its own material and ignores the mesh's, so writing to
+    data.materials there changes nothing anyone can see.
+    """
+    data = getattr(obj, 'data', None)
+    if data is None or not hasattr(data, 'materials'):
+        return False
+    if obj.material_slots:
+        obj.material_slots[0].material = mat
+    else:
+        data.materials.append(mat)
+    return True
+
+
+def _replace_materials(obj, sources, blend):
+    """
+    Put the blend on the material this object actually renders.
+
+    Which slot that is matters. Applying a second material over a whole mesh
+    leaves every face on slot 1, so writing to slot 0 renders nowhere and the
+    object looks completely untouched. Replacing *every* slot is no better: it
+    collapses a deliberate two-material object into one and strips both sources
+    off it.
+
+    So: only the slots the faces actually use, and among those only the ones
+    still holding one of the two sources. A slot nothing renders keeps its
+    material. When nothing matches — a re-run, where the slots already hold the
+    previous blend — the active slot is taken instead, so the object follows
+    along rather than being silently left behind.
+
+    Assignment goes through material_slots rather than mesh.materials: a slot
+    linked to the object renders its own material and ignores the mesh's.
+
+    Returns how many slots changed. The source materials themselves are never
+    modified — only which slots point at them.
+    """
+    data = getattr(obj, 'data', None)
+    if data is None or not hasattr(data, 'materials'):
+        return 0
+
+    slots = obj.material_slots
+    if not slots:
+        data.materials.append(blend)
+        return 1
+
+    polygons = getattr(data, 'polygons', None)
+    if polygons:
+        in_use = {poly.material_index for poly in polygons}
+    else:
+        in_use = set(range(len(slots)))     # curves and text have no polygons
+
+    replaced = 0
+    for index in sorted(in_use):
+        if index >= len(slots):
+            continue
+        current = slots[index].material
+        if current is not None and current.name in sources:
+            slots[index].material = blend
+            replaced += 1
+
+    if replaced == 0:
+        index = max(0, min(obj.active_material_index, len(slots) - 1))
+        slots[index].material = blend
+        replaced = 1
+    return replaced
+
+
+def _best_object_for(objects, base):
+    """
+    Pick the selected object whose name shares the most words with a texture
+    set's name, so importing several sets at once doesn't stack them all onto
+    one object. None when nothing shares a word.
+    """
+    wanted = {t for t in re.split(r'[^A-Za-z0-9]+', base.lower()) if len(t) > 2}
+    best, best_score = None, 0
+    for obj in objects:
+        tokens = {t for t in re.split(r'[^A-Za-z0-9]+', obj.name.lower())
+                  if len(t) > 2}
+        score = len(wanted & tokens)
+        if score > best_score:
+            best, best_score = obj, score
+    return best
+
+
+class ET_OT_MegascansMaterial(bpy.types.Operator):
+    bl_idname  = "et.megascans_material"
+    bl_label   = "Megascans Material"
+    bl_description = ("Pick a Megascans texture folder, or its files, and build a "
+                      "fully wired PBR material for every set found")
+    bl_options = {"REGISTER", "UNDO"}
+
+    filepath:      bpy.props.StringProperty(subtype='FILE_PATH', options={'SKIP_SAVE'})
+    directory:     bpy.props.StringProperty(subtype='DIR_PATH',  options={'SKIP_SAVE'})
+    files:         bpy.props.CollectionProperty(type=bpy.types.OperatorFileListElement,
+                                                options={'SKIP_SAVE'})
+    filter_image:  bpy.props.BoolProperty(default=True, options={'HIDDEN', 'SKIP_SAVE'})
+    filter_folder: bpy.props.BoolProperty(default=True, options={'HIDDEN', 'SKIP_SAVE'})
+
+    scan_subfolders: bpy.props.BoolProperty(
+        name="Scan Subfolders", default=False,
+        description="With no files selected, walk the whole folder tree — one run "
+                    "for a library of assets")
+    resolution: bpy.props.EnumProperty(
+        name="Resolution",
+        items=[('HIGHEST', "Highest", "Take the largest when 2K and 4K sit side by side"),
+               ('LOWEST',  "Lowest",  "Take the smallest, to keep the viewport light")],
+        default='HIGHEST')
+    displacement: bpy.props.EnumProperty(
+        name="Height",
+        items=[('BUMP',         "Bump",         "Bump node — works in EEVEE, no subdivision"),
+               ('DISPLACEMENT', "Displacement", "Displacement output — Cycles, needs subdivision"),
+               ('NONE',         "Load Only",    "Load the map but leave it unconnected")],
+        default='BUMP')
+    displacement_scale: bpy.props.FloatProperty(
+        name="Height Scale", default=0.1, min=0.0, soft_max=1.0,
+        description="Bump distance, or displacement scale, in metres")
+    use_ao: bpy.props.BoolProperty(
+        name="Multiply AO into Base Color", default=False,
+        description="Off by default: baking occlusion into albedo double-darkens "
+                    "under a renderer that already computes it")
+    use_mapping: bpy.props.BoolProperty(
+        name="Add Mapping Nodes", default=True,
+        description="Texture Coordinate and Mapping in front of every texture, so "
+                    "the whole set tiles and rotates from one place")
+    assign_to_selected: bpy.props.BoolProperty(
+        name="Assign to Selected", default=True,
+        description="Put the material in the first slot of the selected objects, "
+                    "replacing what is there")
+    reuse_existing: bpy.props.BoolProperty(
+        name="Reuse Existing", default=True,
+        description="When a material of the same name already exists, use it "
+                    "rather than building a second copy")
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+
+        box = layout.box()
+        box.label(text="Source", icon='FILE_FOLDER')
+        box.prop(self, 'scan_subfolders')
+        box.prop(self, 'resolution')
+
+        box = layout.box()
+        box.label(text="Build", icon='NODETREE')
+        box.prop(self, 'displacement')
+        row = box.row()
+        row.enabled = self.displacement != 'NONE'
+        row.prop(self, 'displacement_scale')
+        box.prop(self, 'use_mapping')
+        box.prop(self, 'use_ao')
+
+        box = layout.box()
+        box.label(text="Result", icon='MATERIAL')
+        box.prop(self, 'reuse_existing')
+        box.prop(self, 'assign_to_selected')
+
+    def _selected_paths(self):
+        directory = self.directory
+        if not directory and self.filepath:
+            directory = os.path.dirname(self.filepath)
+
+        names = [f.name for f in self.files if f.name]
+        if names:
+            paths = [os.path.join(directory, name) for name in names]
+            return [p for p in paths if os.path.isfile(p)]
+
+        if not directory or not os.path.isdir(directory):
+            return []
+
+        if self.scan_subfolders:
+            found = []
+            for root, _dirs, files in os.walk(directory):
+                found.extend(os.path.join(root, name) for name in files)
+            return found
+
+        return [os.path.join(directory, name) for name in os.listdir(directory)
+                if os.path.isfile(os.path.join(directory, name))]
+
+    def execute(self, context):
+        paths = self._selected_paths()
+        if not paths:
+            self.report({'ERROR'}, "Select texture files, or a folder holding them")
+            return {'CANCELLED'}
+
+        sets = _collect_texture_sets(paths, self.resolution == 'HIGHEST')
+        if not sets:
+            self.report({'ERROR'},
+                        f"No recognised maps among {len(paths)} file(s) — expected "
+                        f"names like Rock_4K_Albedo.jpg")
+            return {'CANCELLED'}
+
+        built, reused = [], 0
+        # One index for the whole run: a library import loads hundreds of
+        # textures, and rescanning bpy.data.images for each is quadratic.
+        index = _index_images()
+        for base, slots in sorted(sets.items()):
+            existing = bpy.data.materials.get(base)
+            if existing is not None and self.reuse_existing:
+                built.append((base, existing))
+                reused += 1
+                continue
+
+            try:
+                mat, wired = _build_pbr_material(
+                    base, slots,
+                    use_ao=self.use_ao,
+                    use_mapping=self.use_mapping,
+                    displacement=self.displacement,
+                    displacement_scale=self.displacement_scale,
+                    index=index)
+            except RuntimeError as exc:
+                # A texture that vanished between listing and loading. Report
+                # it rather than throwing a traceback at the user.
+                self.report({'ERROR'}, f"Could not build '{base}': {exc}")
+                return {'CANCELLED'}
+            built.append((base, mat))
+            print(f"[EasyTasks] {mat.name}: {len(slots)} map(s), wired "
+                  f"{', '.join(wired) if wired else 'nothing'}")
+
+        assigned = 0
+        if self.assign_to_selected:
+            # execute() runs with the File Browser in context, where
+            # context.selected_objects is not guaranteed to exist. The view
+            # layer carries the same selection and is always there.
+            objects = [o for o in context.view_layer.objects
+                       if o.select_get()
+                       and getattr(o.data, 'materials', None) is not None]
+            if len(built) == 1:
+                for obj in objects:
+                    assigned += _assign_material(obj, built[0][1])
+            else:
+                for base, mat in built:
+                    match = _best_object_for(objects, base)
+                    if match is not None:
+                        assigned += _assign_material(match, mat)
+
+        names   = ', '.join(name for name, _mat in built[:3])
+        more    = f" +{len(built) - 3}" if len(built) > 3 else ""
+        summary = f"{len(built)} material(s): {names}{more}"
+        if reused:
+            summary += f" ({reused} reused)"
+        if self.assign_to_selected:
+            summary += f", assigned to {assigned} object(s)"
+        self.report({'INFO'}, summary)
+        return {"FINISHED"}
+
+
+# ---------------------------------------------------------------------------
+# Blend two PBR materials through one mask, paintable by hand
+# ---------------------------------------------------------------------------
+
+_MASK_GROUP_NAME  = "ET Blend Mask"
+_MASK_NODE_NAME   = "ET_BlendMask"
+_BLEND_PAINT_ATTR = "ET_BlendPaint"
+_BLEND_PAINT_UV   = "ET_BlendPaintUV"
+_BLEND_PAINT_NODE = "ET_BlendPaintSource"
+
+# Every input the mask group is expected to carry. A .blend saved by an older
+# version has a group without the directional sockets, so the builder checks
+# this before reusing one it found by name.
+_MASK_INPUTS = ('Height', 'Paint', 'Amount', 'Softness', 'Noise Scale',
+                'Paint Influence', 'Direction', 'Directionality',
+                'Direction Falloff', 'Gradient')
+
+# Which way "up" is for a directional blend. World space, so rotating the asset
+# does not carry the snow around with it.
+_DIRECTION_VECTORS = {
+    'UP':    (0.0, 0.0, 1.0),
+    'DOWN':  (0.0, 0.0, -1.0),
+    'X':     (1.0, 0.0, 0.0),
+    'NEG_X': (-1.0, 0.0, 0.0),
+    'Y':     (0.0, 1.0, 0.0),
+    'NEG_Y': (0.0, -1.0, 0.0),
+}
+
+# Only canonical slots take part in a blend. The raw GLOSS / NORMAL_DX keys are
+# already folded into ROUGH / NORMAL by _canonical_sources, and the extras are
+# unconnected by design.
+_BLEND_SLOTS = ('BASE', 'ROUGH', 'METAL', 'SPEC', 'ALPHA', 'NORMAL', 'DISP', 'AO')
+
+# Starting points for the mask, because the useful values are not guessable and
+# every one of these took a round of trial and error to find. Keys match the
+# operator's own property names so a preset can be applied to either the dialog
+# or a finished material.
+_BLEND_PRESETS = {
+    'DIRT': dict(
+        label="Dirt in Crevices", amount=0.40, softness=0.30, noise_scale=4.0,
+        direction='NONE', direction_mode='GRADIENT', direction_falloff=1.0,
+        description="Settles into the low spots of the base — the default use"),
+    'PUDDLES': dict(
+        label="Puddles / Wet", amount=0.55, softness=0.12, noise_scale=2.0,
+        direction='NONE', direction_mode='GRADIENT', direction_falloff=1.0,
+        description="Tight edges pooling in the deepest parts, like standing water"),
+    'GRIME_RISE': dict(
+        label="Grime up a Wall", amount=0.70, softness=0.40, noise_scale=5.0,
+        direction='DOWN', direction_mode='GRADIENT', direction_falloff=0.55,
+        description="Strongest at the base and fading upward — splash and damp"),
+    'SNOW': dict(
+        label="Snow on Top", amount=0.60, softness=0.25, noise_scale=3.0,
+        direction='UP', direction_mode='FACING', direction_falloff=0.60,
+        description="Upward faces only, with a crisp edge. Needs real form, "
+                    "not a flat surface"),
+    'DUST': dict(
+        label="Settled Dust", amount=0.35, softness=0.55, noise_scale=6.0,
+        direction='UP', direction_mode='FACING', direction_falloff=1.0,
+        description="A soft veil on anything facing up"),
+    'MOSS': dict(
+        label="Moss / Damp Side", amount=0.50, softness=0.35, noise_scale=3.0,
+        direction='UP', direction_mode='FACING', direction_falloff=0.85,
+        description="Broken-up growth on upward and angled faces"),
+    'LEAK_DOWN': dict(
+        label="Streaks from Above", amount=0.55, softness=0.35, noise_scale=8.0,
+        direction='UP', direction_mode='GRADIENT', direction_falloff=0.70,
+        description="Strongest at the top, running down — rust and water stains"),
+}
+
+_PRESET_ORDER = ('DIRT', 'PUDDLES', 'GRIME_RISE', 'SNOW', 'DUST', 'MOSS',
+                 'LEAK_DOWN')
+
+
+def _preset_items(_self=None, _context=None):
+    """Enum entries for the presets, plus a Custom that changes nothing."""
+    items = [('CUSTOM', "Custom", "Leave the settings as they are")]
+    items += [(key, _BLEND_PRESETS[key]['label'], _BLEND_PRESETS[key]['description'])
+              for key in _PRESET_ORDER]
+    return items
+
+
+def _active_blend_mask(context):
+    """
+    The Blend Mask node on the active object's active material, or None.
+
+    Everything the mask does lives on this one node's inputs, so the panel can
+    edit a finished blend in place instead of the dialog having to rebuild the
+    material — which would throw away the paint layer every time you nudged a
+    slider.
+    """
+    obj = getattr(context, 'active_object', None)
+    mat = getattr(obj, 'active_material', None)
+    if mat is None or not getattr(mat, 'use_nodes', False):
+        return None
+    return mat.node_tree.nodes.get(_MASK_NODE_NAME)
+
+
+def _direction_coverage(objects, vector):
+    """
+    Best alignment between any face on these objects and a world direction.
+
+    Face-angle blending is silent when it fails: point it Up at a vertical wall
+    and every face scores zero, the gate shuts, and the overlay vanishes
+    entirely — which reads as the tool being broken rather than as the answer
+    being "nothing here faces that way". Sampling lets the operator say so.
+
+    Returns -1.0 when there are no faces to judge.
+    """
+    axis = mathutils.Vector(vector).normalized()
+    best = -1.0
+    for obj in objects:
+        mesh = getattr(obj, 'data', None)
+        polygons = getattr(mesh, 'polygons', None)
+        if not polygons:
+            continue
+        # normals transform by the inverse transpose, not the matrix itself
+        rotation = obj.matrix_world.to_3x3().inverted_safe().transposed()
+        step = max(1, len(polygons) // 200)
+        for index in range(0, len(polygons), step):
+            normal = rotation @ polygons[index].normal
+            if normal.length_squared > 0.0:
+                best = max(best, normal.normalized().dot(axis))
+    return best
+
+
+def _paint_uv_layer(obj):
+    """
+    A UV layer the mask can be painted on without the strokes repeating.
+
+    Tiling surfaces carry UVs that run well past 0-1 so the textures repeat —
+    exactly what you want for the Megascans set, and fatal for a paint mask.
+    Every surface point then shares wrapped coordinates with every other tile,
+    so one stroke appears in all of them at once.
+
+    Scaling a copy of the layout down into 0-1 keeps the arrangement and makes
+    each point unique. The textures are unaffected: they read the active
+    *render* UV map, while painting goes through the active one, and those are
+    separate flags.
+
+    Returns the layer to paint through, or None if the mesh has no UVs.
+    """
+    mesh   = getattr(obj, 'data', None)
+    layers = getattr(mesh, 'uv_layers', None)
+    if not layers:
+        return None
+
+    existing = layers.get(_BLEND_PAINT_UV)
+    if existing is not None:
+        return existing
+
+    source = layers.active or layers[0]
+    count  = len(source.data)
+    if not count:
+        return None
+
+    # foreach_get, not a comprehension: a dense mesh has hundreds of thousands
+    # of loops and stepping through them in Python takes seconds.
+    flat = [0.0] * (count * 2)
+    source.data.foreach_get('uv', flat)
+
+    low_u,  high_u = min(flat[0::2]), max(flat[0::2])
+    low_v,  high_v = min(flat[1::2]), max(flat[1::2])
+
+    # Already inside the tile — nothing repeats, so paint on what is there
+    # rather than adding a layer the file does not need.
+    if -0.001 <= low_u and high_u <= 1.001 and -0.001 <= low_v and high_v <= 1.001:
+        return source
+
+    # One scale for both axes, so the layout keeps its proportions instead of
+    # being squashed to fit the square.
+    span = max(high_u - low_u, high_v - low_v) or 1.0
+    previous_active = layers.active
+    try:
+        layer = layers.new(name=_BLEND_PAINT_UV, do_init=True)
+    except (RuntimeError, TypeError):
+        return source                      # at the 8 layer limit
+    if layer is None:
+        return source
+
+    flat[0::2] = [(u - low_u) / span for u in flat[0::2]]
+    flat[1::2] = [(v - low_v) / span for v in flat[1::2]]
+    layer.data.foreach_set('uv', flat)
+
+    # new() makes itself active, which would silently switch the UV layer under
+    # every object we set up alongside the painted one. _enter_paint selects it
+    # deliberately for the object actually being painted.
+    if previous_active is not None:
+        layers.active = previous_active
+    return layer
+
+
+def _blend_paint_image(node):
+    """The image feeding a Blend Mask node's Paint input, if it is one."""
+    socket = node.inputs.get('Paint') if node is not None else None
+    links  = socket.links if socket is not None else ()
+    if links and links[0].from_node.type == 'TEX_IMAGE':
+        return links[0].from_node.image
+    return None
+
+
+def _save_blend_mask_image(image):
+    """
+    Write a painted mask out to its file.
+
+    Paint lives in memory until something writes it. The file on disk is
+    whatever was there when the mask was created — flat grey — so anything that
+    re-reads the image shows an unpainted mask and the blend looks like it
+    ignored the painting entirely.
+
+    Order matters: packing a dirty image packs the *stale file* and marks the
+    buffer clean, throwing the paint away. Save first, then pack, never the
+    other way round.
+
+    Returns True when something was written.
+    """
+    if image is None or not image.is_dirty:
+        return False
+    try:
+        if image.filepath_raw:
+            image.save()
+            if image.packed_file is not None:
+                image.pack()          # refresh the packed copy from the file
+            return True
+        if image.packed_file is not None:
+            image.pack()
+            return True
+    except RuntimeError:
+        return False
+    return False
+
+
+class ET_OT_SaveBlendMask(bpy.types.Operator):
+    bl_idname  = "et.save_blend_mask"
+    bl_label   = "Save Painted Mask"
+    bl_description = ("Write the painted mask to disk. Until it is saved the "
+                      "paint exists only in memory and a fresh render or a "
+                      "reopened file sees an unpainted mask")
+    bl_options = {"REGISTER"}
+
+    @classmethod
+    def poll(cls, context):
+        return _blend_paint_image(_active_blend_mask(context)) is not None
+
+    def execute(self, context):
+        image = _blend_paint_image(_active_blend_mask(context))
+        if not image.is_dirty:
+            self.report({'INFO'}, f"{image.name} is already saved")
+            return {"FINISHED"}
+        if not _save_blend_mask_image(image):
+            self.report({'ERROR'},
+                        f"{image.name} has nowhere to save to — save the .blend "
+                        f"first, then paint again")
+            return {'CANCELLED'}
+        self.report({'INFO'}, f"Saved {image.name}")
+        return {"FINISHED"}
+
+
+def _material_users(mat):
+    """Mesh objects carrying this material in any slot."""
+    return [obj for obj in bpy.data.objects
+            if getattr(obj, 'type', None) == 'MESH'
+            and any(slot.material == mat for slot in obj.material_slots)]
+
+
+def _gradient_span(objects, vector):
+    """
+    How much depth these objects have along an axis, as a share of their size.
+
+    The ramp reads generated coordinates, which normalise to the bounding box.
+    An axis the object is flat in — Up on a floor plane, whose local Z extent
+    is zero — has nothing to ramp across, so the gradient comes out uniform and
+    looks exactly like the feature doing nothing.
+
+    Returns 0..1 across the objects; near zero means no usable ramp.
+    """
+    axis = mathutils.Vector(vector).normalized()
+    best = 0.0
+    for obj in objects:
+        corners = [mathutils.Vector(corner) for corner in
+                   getattr(obj, 'bound_box', ()) or ()]
+        if not corners:
+            continue
+        try:
+            local = obj.matrix_world.to_3x3().inverted() @ axis
+        except ValueError:
+            continue
+        if local.length_squared == 0.0:
+            continue
+        local.normalize()
+
+        along = [corner.dot(local) for corner in corners]
+        widest = max((max(c[i] for c in corners) - min(c[i] for c in corners))
+                     for i in range(3))
+        if widest > 0.0:
+            best = max(best, (max(along) - min(along)) / widest)
+    return best
+
+
+def _new_group_socket(group, name, socket_type, in_out, default=None,
+                      min_value=None, max_value=None):
+    """Node group sockets moved from group.inputs to group.interface in 4.0."""
+    if hasattr(group, 'interface'):
+        sock = group.interface.new_socket(name=name, in_out=in_out,
+                                          socket_type=socket_type)
+    else:
+        collection = group.inputs if in_out == 'INPUT' else group.outputs
+        sock = collection.new(socket_type, name)
+    if min_value is not None:
+        sock.min_value = min_value
+    if max_value is not None:
+        sock.max_value = max_value
+    if default is not None:
+        sock.default_value = default
+    return sock
+
+
+def _group_input_names(group):
+    """Input socket names of a node group, across the 4.0 interface rework."""
+    if hasattr(group, 'interface'):
+        return {item.name for item in group.interface.items_tree
+                if getattr(item, 'in_out', None) == 'INPUT'}
+    return {sock.name for sock in group.inputs}
+
+
+def _blend_mask_group():
+    """
+    The node group behind Blend Materials, built once and shared.
+
+    Three things decide the mask, in order:
+
+      * height — the overlay collects in the low spots, inverted from the base
+        set's own displacement and broken up by noise;
+      * direction — a gate from the angle between the surface and a world axis,
+        so snow lands on top and streaks run down verticals;
+      * paint — a *signed* offset around mid grey: 0.5 changes nothing, white
+        forces the overlay in, black scrubs it back to the base.
+
+    Paint is applied last, after the gate, so a hand stroke always wins — you
+    can still put snow on the underside of a ledge if the shot needs it.
+
+    Sharing one group keeps the maths in a single place while the sliders stay
+    per-material, because the values live on the group node instance.
+    """
+    group = bpy.data.node_groups.get(_MASK_GROUP_NAME)
+    if group is not None and set(_MASK_INPUTS) <= _group_input_names(group):
+        return group
+    # Anything else is a group from an older version of the add-on. Leave it
+    # exactly as it is so materials already pointing at it keep working, and
+    # build beside it — bpy uniquifies the name.
+
+    group = bpy.data.node_groups.new(_MASK_GROUP_NAME, 'ShaderNodeTree')
+    _new_group_socket(group, 'Height',      'NodeSocketFloat', 'INPUT', 0.5)
+    _new_group_socket(group, 'Paint',       'NodeSocketFloat', 'INPUT', 0.5)
+    _new_group_socket(group, 'Amount',      'NodeSocketFloat', 'INPUT', 0.35, 0.0, 1.0)
+    _new_group_socket(group, 'Softness',    'NodeSocketFloat', 'INPUT', 0.25, 0.01, 1.0)
+    _new_group_socket(group, 'Noise Scale', 'NodeSocketFloat', 'INPUT', 4.0, 0.0, 1000.0)
+    _new_group_socket(group, 'Paint Influence',
+                      'NodeSocketFloat', 'INPUT', 1.0, 0.0, 1.0)
+    _new_group_socket(group, 'Direction',
+                      'NodeSocketVector', 'INPUT', (0.0, 0.0, 1.0))
+    _new_group_socket(group, 'Directionality',
+                      'NodeSocketFloat', 'INPUT', 0.0, 0.0, 1.0)
+    _new_group_socket(group, 'Direction Falloff',
+                      'NodeSocketFloat', 'INPUT', 1.0, 0.01, 1.0)
+    _new_group_socket(group, 'Gradient', 'NodeSocketFloat', 'INPUT', 1.0, 0.0, 1.0)
+    _new_group_socket(group, 'Fac', 'NodeSocketFloat', 'OUTPUT')
+
+    nodes, links = group.nodes, group.links
+    gin  = nodes.new('NodeGroupInput')
+    gin.location = (-900, 0)
+    gout = nodes.new('NodeGroupOutput')
+    gout.location = (700, 0)
+
+    def math(operation, x, y, label=None, clamp=False):
+        node = nodes.new('ShaderNodeMath')
+        node.operation = operation
+        node.location  = (x, y)
+        node.use_clamp = clamp
+        if label:
+            node.label = label
+        return node
+
+    # 1 - height, so the mask is strongest in the crevices
+    invert = math('SUBTRACT', -680, 140, "Invert Height")
+    invert.inputs[0].default_value = 1.0
+    links.new(gin.outputs['Height'], invert.inputs[1])
+
+    noise = nodes.new('ShaderNodeTexNoise')
+    noise.location = (-680, -180)
+    links.new(gin.outputs['Noise Scale'], noise.inputs['Scale'])
+
+    total = math('ADD', -460, 40)
+    links.new(invert.outputs[0], total.inputs[0])
+    links.new(noise.outputs['Fac'], total.inputs[1])
+    average = math('MULTIPLY', -280, 40, "Average")
+    links.new(total.outputs[0], average.inputs[0])
+    average.inputs[1].default_value = 0.5
+
+    # Amount slides the cut, Softness widens the gradient either side of it.
+    centre = math('SUBTRACT', -460, 400, "Threshold")
+    centre.inputs[0].default_value = 1.0
+    links.new(gin.outputs['Amount'], centre.inputs[1])
+    low = math('SUBTRACT', -280, 460)
+    links.new(centre.outputs[0], low.inputs[0])
+    links.new(gin.outputs['Softness'], low.inputs[1])
+    high = math('ADD', -280, 300)
+    links.new(centre.outputs[0], high.inputs[0])
+    links.new(gin.outputs['Softness'], high.inputs[1])
+
+    # Direction: how much this face points the way we care about. The Geometry
+    # node's normal is world space, so rotating the asset does not carry the
+    # snow around with it.
+    geometry = nodes.new('ShaderNodeNewGeometry')
+    geometry.location = (-900, -760)
+
+    axis = nodes.new('ShaderNodeVectorMath')
+    axis.operation = 'NORMALIZE'
+    axis.location  = (-680, -940)
+    links.new(gin.outputs['Direction'], axis.inputs[0])
+
+    facing = nodes.new('ShaderNodeVectorMath')
+    facing.operation = 'DOT_PRODUCT'
+    facing.location  = (-460, -800)
+    facing.label     = "Face vs Direction"
+    links.new(geometry.outputs['Normal'], facing.inputs[0])
+    links.new(axis.outputs['Vector'], facing.inputs[1])
+
+    # Falloff near 0 keeps only faces pointing almost exactly that way; near 1
+    # spreads the gradient across the whole sphere. MULTIPLY then ADD rather
+    # than one MULTIPLY_ADD: its three sockets are all named 'Value', so the
+    # operand order is an assumption, and these two are symmetric.
+    scaled_fall = math('MULTIPLY', -460, -1060, "Falloff Window")
+    links.new(gin.outputs['Direction Falloff'], scaled_fall.inputs[0])
+    scaled_fall.inputs[1].default_value = -2.0
+    window = math('ADD', -280, -1060)
+    links.new(scaled_fall.outputs[0], window.inputs[0])
+    window.inputs[1].default_value = 1.0
+
+    aligned = nodes.new('ShaderNodeMapRange')
+    aligned.location = (-80, -820)
+    links.new(facing.outputs['Value'], aligned.inputs['Value'])
+    links.new(window.outputs[0], aligned.inputs['From Min'])
+    aligned.inputs['From Max'].default_value = 1.0
+
+    # Gradient: where a point sits along the axis, rather than which way it
+    # faces. Generated coordinates are already normalised 0-1 over the object's
+    # bounds, so this is a true 0-to-100 ramp across any mesh at any scale —
+    # and unlike face angle it still means something on a flat wall, where
+    # every normal is identical and the angle can only shift the whole surface
+    # up or down at once.
+    coord = nodes.new('ShaderNodeTexCoord')
+    coord.location = (-900, -1320)
+
+    centred = nodes.new('ShaderNodeVectorMath')
+    centred.operation = 'SUBTRACT'
+    centred.location  = (-680, -1320)
+    centred.label     = "Centre Bounds"
+    links.new(coord.outputs['Generated'], centred.inputs[0])
+    centred.inputs[1].default_value = (0.5, 0.5, 0.5)
+
+    # Generated coordinates are *object* space; Direction is world space. A
+    # wall modelled flat and stood up by its object rotation has its height on
+    # local Y, so dotting world Z straight against it reads the plane's
+    # degenerate axis and the ramp comes out perfectly flat. Bring the axis
+    # into the same space first.
+    axis_local = nodes.new('ShaderNodeVectorTransform')
+    axis_local.vector_type  = 'VECTOR'
+    axis_local.convert_from = 'WORLD'
+    axis_local.convert_to   = 'OBJECT'
+    axis_local.location     = (-900, -1500)
+    links.new(gin.outputs['Direction'], axis_local.inputs[0])
+
+    # Object scale changes the transformed length, so normalise after.
+    axis_norm = nodes.new('ShaderNodeVectorMath')
+    axis_norm.operation = 'NORMALIZE'
+    axis_norm.location  = (-680, -1500)
+    links.new(axis_local.outputs[0], axis_norm.inputs[0])
+
+    # Centring means a negative axis reads 0-1 the same way a positive one
+    # does, so Down is simply Up with the ramp the other way round.
+    along = nodes.new('ShaderNodeVectorMath')
+    along.operation = 'DOT_PRODUCT'
+    along.location  = (-460, -1320)
+    along.label     = "Position Along Axis"
+    links.new(centred.outputs['Vector'], along.inputs[0])
+    links.new(axis_norm.outputs['Vector'], along.inputs[1])
+
+    where = math('ADD', -280, -1320)
+    links.new(along.outputs['Value'], where.inputs[0])
+    where.inputs[1].default_value = 0.5
+
+    # Falloff is the share of the mesh the ramp spans: 1 covers all of it,
+    # 0.3 keeps the transition to the last third before the axis runs out.
+    ramp_start = math('SUBTRACT', -280, -1500, "Ramp Start")
+    ramp_start.inputs[0].default_value = 1.0
+    links.new(gin.outputs['Direction Falloff'], ramp_start.inputs[1])
+
+    gradient = nodes.new('ShaderNodeMapRange')
+    gradient.location = (-80, -1320)
+    links.new(where.outputs[0], gradient.inputs['Value'])
+    links.new(ramp_start.outputs[0], gradient.inputs['From Min'])
+    gradient.inputs['From Max'].default_value = 1.0
+    # Linear clamps flat below the start and then climbs at full slope, which
+    # leaves a hard line across the surface exactly where the ramp begins.
+    # Smoothstep eases in and out, so the ramp has no seam at either end.
+    try:
+        gradient.interpolation_type = 'SMOOTHSTEP'
+    except (AttributeError, TypeError):
+        pass
+
+    # Gradient picks which of the two drives the gate: 0 face angle, 1 ramp.
+    spread = math('SUBTRACT', 120, -1180)
+    links.new(gradient.outputs['Result'], spread.inputs[0])
+    links.new(aligned.outputs['Result'], spread.inputs[1])
+    chosen = math('MULTIPLY', 300, -1180)
+    links.new(spread.outputs[0], chosen.inputs[0])
+    links.new(gin.outputs['Gradient'], chosen.inputs[1])
+    combined = math('ADD', 480, -1180, "Facing or Gradient")
+    links.new(aligned.outputs['Result'], combined.inputs[0])
+    links.new(chosen.outputs[0], combined.inputs[1])
+
+    # Directionality 0 must leave the gate wide open, so a material built
+    # before this existed behaves exactly as it always did: 1 + d * (a - 1).
+    swing = math('SUBTRACT', 660, -900, "Gate")
+    links.new(combined.outputs[0], swing.inputs[0])
+    swing.inputs[1].default_value = 1.0
+    weighted = math('MULTIPLY', 300, -900)
+    links.new(swing.outputs[0], weighted.inputs[0])
+    links.new(gin.outputs['Directionality'], weighted.inputs[1])
+    gate = math('ADD', 480, -900)
+    links.new(weighted.outputs[0], gate.inputs[0])
+    gate.inputs[1].default_value = 1.0
+
+    shape = nodes.new('ShaderNodeMapRange')
+    shape.location = (160, 180)
+    links.new(average.outputs[0], shape.inputs['Value'])
+    links.new(low.outputs[0],  shape.inputs['From Min'])
+    links.new(high.outputs[0], shape.inputs['From Max'])
+
+    # The gate multiplies the *shaped* mask, not the raw height. Gating first
+    # and thresholding after squeezes the ramp into whatever narrow band the
+    # threshold leaves — it could reach neither 0 nor 1, so a gradient could
+    # never actually run from none of the overlay to all of it. This way the
+    # direction scales the finished mask: 0 where the axis runs out, full
+    # strength where it points.
+    gated = math('MULTIPLY', 400, 120, "Mask x Direction")
+    links.new(shape.outputs['Result'], gated.inputs[0])
+    links.new(gate.outputs[0], gated.inputs[1])
+
+    # paint, as a signed offset around mid grey
+    offset = math('SUBTRACT', -460, -420, "Paint Offset")
+    links.new(gin.outputs['Paint'], offset.inputs[0])
+    offset.inputs[1].default_value = 0.5
+    doubled = math('MULTIPLY', -280, -420)
+    links.new(offset.outputs[0], doubled.inputs[0])
+    doubled.inputs[1].default_value = 2.0
+    scaled = math('MULTIPLY', -60, -420)
+    links.new(doubled.outputs[0], scaled.inputs[0])
+    links.new(gin.outputs['Paint Influence'], scaled.inputs[1])
+
+    # Paint goes on last, after the gate, so a hand stroke always wins.
+    final = math('ADD', 600, 0, "Mask", clamp=True)
+    links.new(gated.outputs[0], final.inputs[0])
+    links.new(scaled.outputs[0], final.inputs[1])
+    links.new(final.outputs[0], gout.inputs[0])
+    return group
+
+
+def _material_texture_slots(mat):
+    """
+    Recover {slot: filepath} from a material's image nodes.
+
+    Runs the same filename parser the importer uses, so it reads materials this
+    add-on built and any other sanely-named set equally. Images with no file
+    behind them (generated, packed-only) are skipped — the builder loads from
+    disk.
+    """
+    if mat is None or not getattr(mat, 'use_nodes', False):
+        return {}
+
+    found = {}
+    for node in mat.node_tree.nodes:
+        if node.type != 'TEX_IMAGE' or node.image is None or not node.image.filepath:
+            continue
+        path = bpy.path.abspath(node.image.filepath)
+        stem = os.path.splitext(os.path.basename(path))[0]
+        _base, slot, _res = _split_texture_name(stem)
+        if slot is not None:
+            found.setdefault(slot, path)
+    return found
+
+
+def _build_blend_material(name, slots_a, slots_b, use_ao=False, use_mapping=True,
+                          displacement='BUMP', displacement_scale=0.1,
+                          amount=0.35, noise_scale=4.0, softness=0.25,
+                          direction='NONE', directionality=1.0,
+                          direction_falloff=1.0, direction_mode='GRADIENT'):
+    """Mix two texture sets through one shared mask. Returns (material, notes)."""
+    mat, nodes, links, bsdf, output = _new_shader_material(name)
+    mapping = _add_mapping(nodes, links, -2300) if use_mapping else None
+
+    index = _index_images()
+    tex_a = _texture_column(nodes, links, slots_a, -1900, 400, mapping, index)
+    tex_b = _texture_column(nodes, links, slots_b, -1900,
+                            100 - 300 * len(slots_a), mapping, index)
+    source_a, notes_a = _canonical_sources(nodes, links, tex_a)
+    source_b, notes_b = _canonical_sources(nodes, links, tex_b)
+
+    mask_node = nodes.new('ShaderNodeGroup')
+    mask_node.node_tree = _blend_mask_group()
+    mask_node.name      = _MASK_NODE_NAME
+    mask_node.label     = "Blend Mask"
+    mask_node.location  = (-1180, 620)
+    mask_node.width     = 230
+    mask_node.inputs['Amount'].default_value      = amount
+    mask_node.inputs['Softness'].default_value    = softness
+    mask_node.inputs['Noise Scale'].default_value = noise_scale
+
+    vector = _DIRECTION_VECTORS.get(direction)
+    mask_node.inputs['Gradient'].default_value = \
+        1.0 if direction_mode == 'GRADIENT' else 0.0
+    if vector is not None:
+        mask_node.inputs['Direction'].default_value         = vector
+        mask_node.inputs['Directionality'].default_value    = directionality
+        mask_node.inputs['Direction Falloff'].default_value = direction_falloff
+    else:
+        mask_node.inputs['Directionality'].default_value = 0.0
+
+    # The mask reads the base set's height *before* the mix, so the blend can
+    # never feed back into the thing that decides it.
+    height_a = source_a.get('DISP')
+    if height_a is not None:
+        links.new(height_a, mask_node.inputs['Height'])
+    mask = mask_node.outputs['Fac']
+
+    blended, mixed = {}, []
+    y = 500
+    for slot in _BLEND_SLOTS:
+        a, b = source_a.get(slot), source_b.get(slot)
+        if a is None or b is None:
+            # only one side has it — pass it straight through rather than
+            # mixing against a flat colour that would wash the map out
+            if a is not None or b is not None:
+                blended[slot] = a if a is not None else b
+            continue
+        mix, fac, in_a, in_b, out = _new_mix(nodes, 'MIX')
+        mix.location = (-760, y)
+        mix.label    = slot.title()
+        links.new(mask, fac)
+        links.new(a, in_a)
+        links.new(b, in_b)
+        blended[slot] = out
+        mixed.append(slot.lower())
+        y -= 220
+
+    wired = _wire_principled(nodes, links, mat, bsdf, output, blended,
+                             use_ao=use_ao, displacement=displacement,
+                             displacement_scale=displacement_scale)
+
+    notes = notes_a + notes_b
+    notes.append(f"mixed {', '.join(mixed) if mixed else 'nothing'}")
+    return mat, notes + wired
+
+
+class ET_OT_BlendMaterials(bpy.types.Operator):
+    bl_idname  = "et.blend_materials"
+    bl_label   = "Blend Materials"
+    bl_description = ("Mix two PBR materials through one mask — the overlay settles "
+                      "into the base's low spots, and Paint Mask edits it by hand")
+    bl_options = {"REGISTER", "UNDO"}
+
+    def _load_preset(self, context):
+        """Write a preset's values across the mask properties."""
+        values = _BLEND_PRESETS.get(self.preset)
+        if values is None:                      # 'CUSTOM' leaves everything be
+            return
+        for key, value in values.items():
+            if key not in ('label', 'description'):
+                setattr(self, key, value)
+
+    preset: bpy.props.EnumProperty(
+        name="Preset", items=_preset_items, update=_load_preset,
+        description="A starting point for the mask. Everything below stays "
+                    "editable afterwards")
+    material_a: bpy.props.StringProperty(
+        name="Base", description="The clean material underneath")
+    material_b: bpy.props.StringProperty(
+        name="Overlay", description="The material blended on top — dirt, moss, snow")
+    amount: bpy.props.FloatProperty(
+        name="Overlay Amount", default=0.35, min=0.0, max=1.0,
+        description="How much of the overlay shows before you paint anything")
+    softness: bpy.props.FloatProperty(
+        name="Softness", default=0.25, min=0.01, max=1.0,
+        description="Width of the transition — low is a crisp edge, high a slow fade")
+    noise_scale: bpy.props.FloatProperty(
+        name="Noise Scale", default=4.0, min=0.0, soft_max=50.0,
+        description="Breaks the height mask up so the transition isn't mathematically even")
+    direction: bpy.props.EnumProperty(
+        name="Axis",
+        items=[('NONE',  "Any",   "No direction — height and noise only"),
+               ('UP',    "Up",    "Overlay strongest at the top / on upward faces"),
+               ('DOWN',  "Down",  "Overlay strongest at the bottom / underneath"),
+               ('X',     "+X",    "Strongest toward +X"),
+               ('NEG_X', "-X",    "Strongest toward -X"),
+               ('Y',     "+Y",    "Strongest toward +Y"),
+               ('NEG_Y', "-Y",    "Strongest toward -Y")],
+        default='NONE',
+        description="Which way the overlay builds up. The axis points at the "
+                    "end where it is strongest")
+    direction_mode: bpy.props.EnumProperty(
+        name="Mode",
+        items=[('GRADIENT', "Gradient",
+                "Ramp the overlay along the axis, 0 to 100 across the mesh — "
+                "grime climbing a wall. Works on any shape, flat ones included"),
+               ('FACING', "Face Angle",
+                "Restrict the overlay to faces pointing that way — snow on top "
+                "of a rock. Does nothing on a flat surface, where every face "
+                "points the same way")],
+        default='GRADIENT',
+        description="Whether the direction reads where a point is, or which "
+                    "way its surface faces")
+    directionality: bpy.props.FloatProperty(
+        name="Strength", default=1.0, min=0.0, max=1.0,
+        description="How hard the direction bites. 0 ignores it entirely")
+    direction_falloff: bpy.props.FloatProperty(
+        name="Falloff", default=1.0, min=0.01, max=1.0,
+        description="Gradient: how much of the mesh the ramp spans — 1 all of "
+                    "it, 0.3 just the last third. Face Angle: how tightly it "
+                    "hugs the exact direction")
+    displacement: bpy.props.EnumProperty(
+        name="Height",
+        items=[('BUMP',         "Bump",         "Bump node — works in EEVEE, no subdivision"),
+               ('DISPLACEMENT', "Displacement", "Displacement output — Cycles, needs subdivision"),
+               ('NONE',         "Load Only",    "Leave height unconnected")],
+        default='BUMP')
+    displacement_scale: bpy.props.FloatProperty(
+        name="Height Scale", default=0.1, min=0.0, soft_max=1.0)
+    use_mapping: bpy.props.BoolProperty(name="Add Mapping Nodes", default=True)
+    use_ao: bpy.props.BoolProperty(name="Multiply AO into Base Color", default=False)
+    assign_to_selected: bpy.props.BoolProperty(
+        name="Assign to Selected", default=True,
+        description="Put the blend in the first slot of the selected objects")
+
+    def invoke(self, context, event):
+        obj = context.active_object
+        mats = [m for m in getattr(obj.data, 'materials', []) or [] if m is not None] \
+            if obj is not None else []
+        if mats and not self.material_a:
+            self.material_a = mats[0].name
+        if len(mats) > 1 and not self.material_b:
+            self.material_b = mats[1].name
+        return context.window_manager.invoke_props_dialog(self, width=360)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+
+        box = layout.box()
+        box.label(text="Materials", icon='MATERIAL')
+        box.prop_search(self, 'material_a', bpy.data, 'materials')
+        box.prop_search(self, 'material_b', bpy.data, 'materials')
+
+        box = layout.box()
+        box.label(text="Preset", icon='PRESET')
+        box.prop(self, 'preset', text="")
+
+        box = layout.box()
+        box.label(text="Mask", icon='MOD_MASK')
+        box.prop(self, 'amount')
+        box.prop(self, 'softness')
+        box.prop(self, 'noise_scale')
+
+        box = layout.box()
+        box.label(text="Direction", icon='NORMALS_FACE')
+        box.prop(self, 'direction')
+        col = box.column()
+        col.enabled = self.direction != 'NONE'
+        col.prop(self, 'direction_mode')
+        col.prop(self, 'directionality')
+        col.prop(self, 'direction_falloff')
+        if self.direction != 'NONE' and self.direction_mode == 'FACING':
+            box.label(text="Face Angle does nothing on a flat surface",
+                      icon='ERROR')
+        box.label(text="Paint it by hand afterwards with Paint Mask", icon='BRUSH_DATA')
+
+        box = layout.box()
+        box.label(text="Build", icon='NODETREE')
+        box.prop(self, 'displacement')
+        row = box.row()
+        row.enabled = self.displacement != 'NONE'
+        row.prop(self, 'displacement_scale')
+        if self.displacement == 'DISPLACEMENT':
+            box.label(text="Cycles only — EEVEE ignores this output",
+                      icon='INFO')
+        box.prop(self, 'use_mapping')
+        box.prop(self, 'use_ao')
+        box.prop(self, 'assign_to_selected')
+
+    def execute(self, context):
+        mat_a = bpy.data.materials.get(self.material_a)
+        mat_b = bpy.data.materials.get(self.material_b)
+        if mat_a is None or mat_b is None:
+            self.report({'ERROR'}, "Pick two materials to blend")
+            return {'CANCELLED'}
+        if mat_a is mat_b:
+            self.report({'ERROR'}, "Pick two different materials")
+            return {'CANCELLED'}
+
+        slots_a = _material_texture_slots(mat_a)
+        slots_b = _material_texture_slots(mat_b)
+        for mat, slots in ((mat_a, slots_a), (mat_b, slots_b)):
+            if not slots:
+                self.report({'ERROR'},
+                            f"No recognisable texture maps in '{mat.name}' — the blend "
+                            f"reads image nodes named like Rock_4K_Albedo.jpg")
+                return {'CANCELLED'}
+
+        try:
+            blend, notes = _build_blend_material(
+                f"{mat_a.name}_{mat_b.name}_Blend", slots_a, slots_b,
+                use_ao=self.use_ao, use_mapping=self.use_mapping,
+                displacement=self.displacement,
+                displacement_scale=self.displacement_scale,
+                amount=self.amount, noise_scale=self.noise_scale,
+                softness=self.softness, direction=self.direction,
+                directionality=self.directionality,
+                direction_falloff=self.direction_falloff,
+                direction_mode=self.direction_mode)
+        except RuntimeError as exc:
+            # A source material pointing at a texture that is no longer on disk.
+            self.report({'ERROR'},
+                        f"Could not read the textures behind these materials: {exc}")
+            return {'CANCELLED'}
+        if self.direction != 'NONE':
+            notes.append(f"{self.direction_mode.lower()} "
+                         f"{self.direction.lower().replace('neg_', '-')}")
+        print(f"[EasyTasks] {blend.name}: {', '.join(notes)}")
+
+        objects, filled_slots = 0, 0
+        targets = []
+        if self.assign_to_selected:
+            sources = {mat_a.name, mat_b.name}
+            for obj in context.view_layer.objects:
+                if obj.select_get() and getattr(obj.data, 'materials', None) is not None:
+                    filled = _replace_materials(obj, sources, blend)
+                    filled_slots += filled
+                    objects += bool(filled)
+                    if filled:
+                        targets.append(obj)
+
+        # Both modes have a way of silently producing nothing, and they are not
+        # the same way: Face Angle when no face points that way, Gradient when
+        # the object has no depth along the axis to ramp across.
+        caution = None
+        vector  = _DIRECTION_VECTORS.get(self.direction)
+        label   = self.direction.lower().replace('neg_', '-')
+        if vector is not None and targets and self.directionality > 0.0:
+            if self.direction_mode == 'FACING':
+                # Below this the gate is shut and the overlay cannot show.
+                cutoff = 1.0 - 2.0 * self.direction_falloff
+                if _direction_coverage(targets, vector) <= cutoff:
+                    caution = (f"nothing faces {label}, so the overlay will not "
+                               f"show — use Gradient, raise Falloff, or pick a "
+                               f"direction the geometry points")
+            elif _gradient_span(targets, vector) < 0.01:
+                caution = (f"flat along {label}, so the gradient has nothing to "
+                           f"ramp across — a floor ramps along X or Y, not up")
+
+        summary = (f"{blend.name} built, {filled_slots} slot(s) on "
+                   f"{objects} object(s)")
+        # One report, not two: a later call replaces the banner, so a warning
+        # followed by a summary is a warning the user never sees.
+        if caution:
+            self.report({'WARNING'}, f"{summary} — but {caution}")
+        else:
+            self.report({'INFO'},
+                        f"{summary} — use Paint Mask to add or remove by hand")
+        return {"FINISHED"}
+
+
+class ET_OT_ApplyBlendPreset(bpy.types.Operator):
+    bl_idname  = "et.apply_blend_preset"
+    bl_label   = "Apply Blend Preset"
+    bl_description = ("Load a preset onto the blend already on this object, "
+                      "without rebuilding the material or losing painted work")
+    bl_options = {"REGISTER", "UNDO"}
+
+    preset: bpy.props.EnumProperty(name="Preset", items=_preset_items)
+
+    @classmethod
+    def poll(cls, context):
+        return _active_blend_mask(context) is not None
+
+    def execute(self, context):
+        values = _BLEND_PRESETS.get(self.preset)
+        if values is None:
+            return {'CANCELLED'}
+
+        node = _active_blend_mask(context)
+        # Property names on the operator, socket names on the group: one map
+        # rather than two parallel sets of magic strings.
+        sockets = {
+            'amount':            'Amount',
+            'softness':          'Softness',
+            'noise_scale':       'Noise Scale',
+            'direction_falloff': 'Direction Falloff',
+        }
+        for key, socket_name in sockets.items():
+            socket = node.inputs.get(socket_name)
+            if socket is not None:
+                socket.default_value = values[key]
+
+        vector = _DIRECTION_VECTORS.get(values['direction'])
+        axis   = node.inputs.get('Direction')
+        if axis is not None:
+            axis.default_value = vector or (0.0, 0.0, 1.0)
+        strength = node.inputs.get('Directionality')
+        if strength is not None:
+            strength.default_value = 0.0 if vector is None else 1.0
+        gradient = node.inputs.get('Gradient')
+        if gradient is not None:
+            gradient.default_value = \
+                1.0 if values['direction_mode'] == 'GRADIENT' else 0.0
+
+        self.report({'INFO'}, f"{values['label']} applied — painting untouched")
+        return {"FINISHED"}
+
+
+class ET_OT_SetBlendAxis(bpy.types.Operator):
+    bl_idname  = "et.set_blend_axis"
+    bl_label   = "Blend Axis"
+    bl_description = "Point the blend's direction along a world axis"
+    bl_options = {"REGISTER", "UNDO"}
+
+    axis: bpy.props.EnumProperty(
+        name="Axis",
+        items=[(key, key.replace('NEG_', '-'), f"Build the overlay toward {key}")
+               for key in ('UP', 'DOWN', 'X', 'NEG_X', 'Y', 'NEG_Y')],
+        default='UP')
+
+    @classmethod
+    def poll(cls, context):
+        node = _active_blend_mask(context)
+        # A material built by an older version has a mask group without the
+        # directional sockets, and reaching for one would raise on click.
+        return node is not None and 'Direction' in node.inputs
+
+    def execute(self, context):
+        node   = _active_blend_mask(context)
+        socket = node.inputs.get('Direction') if node is not None else None
+        if socket is None:
+            self.report({'ERROR'},
+                        "This blend's mask has no Direction input — rebuild it "
+                        "with Blend Materials to pick up the newer mask")
+            return {'CANCELLED'}
+        socket.default_value = _DIRECTION_VECTORS[self.axis]
+        return {"FINISHED"}
+
+
+class ET_OT_PaintBlendMask(bpy.types.Operator):
+    bl_idname  = "et.paint_blend_mask"
+    bl_label   = "Paint Blend Mask"
+    bl_description = ("Paint the blend by hand — white adds the overlay, black scrubs "
+                      "it back to the base. Click again to leave paint mode")
+    bl_options = {"REGISTER"}
+
+    mask_type: bpy.props.EnumProperty(
+        name="Paint On",
+        items=[('IMAGE',  "Image",        "A mask image — full resolution on any mesh, needs UVs"),
+               ('VERTEX', "Vertex Color", "A colour attribute — no UVs needed, "
+                                          "but only as fine as the geometry")],
+        default='IMAGE')
+    resolution: bpy.props.EnumProperty(
+        name="Resolution",
+        items=[('1024', "1K", ""), ('2048', "2K", ""), ('4096', "4K", "")],
+        default='2048')
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == 'MESH'
+
+    def execute(self, context):
+        obj = context.active_object
+        # Blender's banner shows only the last report, so anything worth saying
+        # is gathered here and said once at the end.
+        self._cautions = []
+
+        if obj.mode in {'TEXTURE_PAINT', 'VERTEX_PAINT'}:
+            bpy.ops.object.mode_set(mode='OBJECT')
+            # Leaving is the moment to make the strokes durable. Without this
+            # the paint is only ever in memory, and a render or a reopened file
+            # reads the flat grey the mask was created with.
+            image = _blend_paint_image(_active_blend_mask(context))
+            if _save_blend_mask_image(image):
+                self.report({'INFO'}, f"Left paint mode, saved {image.name}")
+            elif image is not None and image.is_dirty:
+                self.report({'WARNING'},
+                            f"Left paint mode, but {image.name} could not be "
+                            f"saved — save the .blend, then use Save Painted Mask")
+            else:
+                self.report({'INFO'}, "Left paint mode")
+            return {'FINISHED'}
+
+        mat  = obj.active_material
+        node = None
+        if mat is not None and mat.use_nodes:
+            node = mat.node_tree.nodes.get(_MASK_NODE_NAME)
+        if node is None:
+            self.report({'ERROR'},
+                        "No blend mask on this material — run Blend Materials first")
+            return {'CANCELLED'}
+
+        # Checked here rather than at creation time: an object can reach an
+        # already-painted material and still have nothing to paint onto.
+        if self.mask_type == 'IMAGE' and not obj.data.uv_layers:
+            self.report({'ERROR'},
+                        f"{obj.name} has no UV map — unwrap it, or set Paint On to "
+                        f"Vertex Color")
+            return {'CANCELLED'}
+
+        source = self._resolve_source(obj, mat, node)
+        if source is None:
+            return {'CANCELLED'}
+
+        if self.mask_type == 'IMAGE':
+            self._share_paint_uvs(mat, obj)
+
+        return self._enter_paint(context, obj, source)
+
+    def _share_paint_uvs(self, mat, painted):
+        """
+        Every object on this material needs the paint UV layer, and the user
+        needs telling what sharing means.
+
+        The mask is sampled through a UV map looked up *by name*. An object that
+        does not have it falls back silently and shows no paint at all — which
+        is what happens the moment one material covers a floor made of twenty
+        planes and only the active one was set up.
+
+        Giving them all the layer stops the silent failure, but it cannot make
+        the paint independent: one material means one mask image, and each mesh
+        normalises its own layout onto the whole of it, so a stroke on one lands
+        on all of them. Only separate materials can separate the masks.
+
+        Anything worth saying goes on the caution list rather than being
+        reported here: the banner only shows the last report, and entering
+        paint mode reports after this.
+        """
+        users = _material_users(mat)
+        for other in users:
+            if other is not painted:
+                _paint_uv_layer(other)
+
+        if len(users) > 1:
+            self._cautions.append(
+                f"{mat.name} is on {len(users)} objects sharing one mask, so "
+                f"painting one paints them all — make it single-user (the "
+                f"number beside the material name) to paint this one alone")
+
+    def _resolve_source(self, obj, mat, node):
+        """
+        Find or build the paint layer feeding the mask.
+
+        Switching between an image and a vertex mask only moves the link. The
+        layer you already painted stays in the tree, so switching back brings
+        that work with it rather than starting from grey again.
+        """
+        wanted   = 'TEX_IMAGE' if self.mask_type == 'IMAGE' else 'ATTRIBUTE'
+        tree     = mat.node_tree
+        existing = node.inputs['Paint'].links
+
+        if existing:
+            if existing[0].from_node.type == wanted:
+                return existing[0].from_node
+            tree.links.remove(existing[0])
+
+        # By name, not label: a label is free text the user may well retitle,
+        # and losing track of it would silently start a second paint layer.
+        previous = next((n for n in tree.nodes
+                         if n.name.startswith(_BLEND_PAINT_NODE)
+                         and n.type == wanted), None)
+        if previous is not None:
+            tree.links.new(self._source_output(previous), node.inputs['Paint'])
+            return previous
+
+        return self._create_source(obj, mat, node)
+
+    @staticmethod
+    def _source_output(source):
+        return source.outputs['Color'] if source.type == 'TEX_IMAGE' \
+            else source.outputs['Fac']
+
+    def _create_source(self, obj, mat, node):
+        nodes = mat.node_tree.nodes
+        links = mat.node_tree.links
+
+        if self.mask_type == 'VERTEX':
+            mesh = obj.data
+            attr = mesh.color_attributes.get(_BLEND_PAINT_ATTR)
+            if attr is None:
+                attr = mesh.color_attributes.new(_BLEND_PAINT_ATTR,
+                                                 'FLOAT_COLOR', 'CORNER')
+                # mid grey is the neutral value the mask group expects
+                attr.data.foreach_set('color', [0.5, 0.5, 0.5, 1.0] * len(attr.data))
+            mesh.color_attributes.active_color_index = \
+                mesh.color_attributes.find(attr.name)
+
+            source = nodes.new('ShaderNodeAttribute')
+            source.attribute_name = _BLEND_PAINT_ATTR
+            source.name     = _BLEND_PAINT_NODE
+            source.label    = "Blend Paint"
+            source.location = (node.location.x - 320, node.location.y - 300)
+            links.new(source.outputs['Fac'], node.inputs['Paint'])
+            return source
+
+        size  = int(self.resolution)
+        image = bpy.data.images.new(f"{mat.name}_Mask", size, size, alpha=False)
+        image.generated_color = (0.5, 0.5, 0.5, 1.0)
+        _set_non_color(image)
+        self._persist(image)
+
+        source = nodes.new('ShaderNodeTexImage')
+        source.image    = image
+        source.name     = _BLEND_PAINT_NODE
+        source.label    = "Blend Paint"
+        source.location = (node.location.x - 360, node.location.y - 300)
+        links.new(source.outputs['Color'], node.inputs['Paint'])
+
+        # Sample the mask through its own 0-1 layer, never the tiled one the
+        # textures use, or a single stroke shows up in every tile at once.
+        layer = _paint_uv_layer(obj)
+        if layer is not None:
+            uv_node = nodes.new('ShaderNodeUVMap')
+            uv_node.uv_map   = layer.name
+            uv_node.label    = "Paint UVs"
+            uv_node.location = (source.location.x - 220, source.location.y - 60)
+            links.new(uv_node.outputs['UV'], source.inputs['Vector'])
+        return source
+
+    def _persist(self, image):
+        """
+        Give the mask a file on disk, next to the blend.
+
+        A generated image cannot be packed — Blender declines silently, it does
+        not raise — and its pixels are rebuilt from generated_color on every
+        reload, so anything painted would simply be gone. Writing it out is the
+        only thing that actually keeps it. Same `textures/` convention Scene
+        Snapshot uses for `snapshots/`.
+        """
+        if not bpy.data.filepath:
+            self._cautions.append(
+                f"{image.name} exists only in memory — save the .blend, then use "
+                f"Save Painted Mask, or the paint is lost on reload")
+            return
+        folder = os.path.join(os.path.dirname(bpy.data.filepath), "textures")
+        try:
+            os.makedirs(folder, exist_ok=True)
+            image.filepath_raw = os.path.join(folder, f"{image.name}.png")
+            image.file_format  = 'PNG'
+            image.save()
+        except (RuntimeError, OSError) as exc:
+            self._cautions.append(f"could not save {image.name}: {exc}")
+
+    def _enter_paint(self, context, obj, source):
+        ts = context.scene.tool_settings
+
+        if source.type == 'ATTRIBUTE':
+            mode  = 'VERTEX_PAINT'
+            paint = getattr(ts, 'vertex_paint', None)
+        else:
+            mode  = 'TEXTURE_PAINT'
+            # Strokes are projected through the mesh's active UV layer, so it
+            # has to be the same non-tiling one the mask node samples.
+            layer = _paint_uv_layer(obj)
+            if layer is not None:
+                obj.data.uv_layers.active = layer
+
+            paint = getattr(ts, 'image_paint', None)
+            if paint is not None:
+                # IMAGE mode paints exactly one target. In MATERIAL mode every
+                # image node in the tree is a paint slot, so a stray stroke
+                # could land on the Megascans albedo — and saving images would
+                # then write over the library file itself.
+                paint.mode   = 'IMAGE'
+                paint.canvas = source.image
+
+        try:
+            bpy.ops.object.mode_set(mode=mode)
+        except RuntimeError as exc:
+            self.report({'WARNING'}, f"Mask ready, but paint mode refused: {exc}")
+            return {'FINISHED'}
+
+        self._set_brush_colors(context, paint)
+        # One report: the banner shows the last one, so a caution followed by
+        # the usual hint would be a caution nobody reads.
+        if self._cautions:
+            self.report({'WARNING'}, "Painting — " + "; ".join(self._cautions))
+        else:
+            self.report({'INFO'},
+                        "Painting the blend mask — white adds, black removes, "
+                        "X swaps")
+        return {'FINISHED'}
+
+    @staticmethod
+    def _set_brush_colors(context, paint):
+        """Brushes became assets in 5.0, so every one of these may be absent."""
+        ts      = context.scene.tool_settings
+        unified = getattr(ts, 'unified_paint_settings', None)
+        for holder in (getattr(paint, 'brush', None), unified):
+            if holder is None:
+                continue
+            for attr, value in (('color', (1.0, 1.0, 1.0)),
+                                ('secondary_color', (0.0, 0.0, 0.0))):
+                try:
+                    setattr(holder, attr, value)
+                except (AttributeError, TypeError):
+                    pass
+
+
+# ---------------------------------------------------------------------------
 # LOD Generator
 # ---------------------------------------------------------------------------
 
@@ -2955,6 +4911,7 @@ class ET_MT_AnalysisMenu(bpy.types.Menu):
         layout.operator('et.cavity_preview',        text='Cavity Preview',      icon='SHADING_RENDERED')
         layout.operator('et.face_stretch_analyzer', text='Face Stretch',        icon='MOD_UVPROJECT')
         layout.operator('et.smart_duplicate',       text='Smart Duplicate',     icon='DUPLICATE')
+        layout.operator('et.uv_health',             text='UV Health Check',     icon='UV')
         layout.operator('et.stacked_uv_detector',   text='Stacked UV Detector', icon='UV_SYNC_SELECT')
 
 
@@ -3125,10 +5082,20 @@ class ET_PT_ToolsPanel(bpy.types.Panel):
         col.operator('et.clean_up_mesh',   text='Clean Up Mesh',    icon='BRUSH_DATA')
 
         box = layout.box()
+        box.label(text="Materials", icon='MATERIAL')
+        col = box.column(align=True)
+        col.operator('et.megascans_material',    text='Megascans Material',    icon='NODE_MATERIAL')
+        col.operator('et.blend_materials',       text='Blend Materials',       icon='MOD_MASK')
+        # Painting and the mask sliders live in the Blend Mask panel, which
+        # appears by itself once a blended material is active. Repeating them
+        # here would put the same button on screen twice in one tab.
+        col.separator()
+        col.operator('et.consolidate_materials', text='Consolidate Materials', icon='MATERIAL')
+
+        box = layout.box()
         box.label(text="Scene", icon='SCENE_DATA')
         col = box.column(align=True)
         col.operator('et.generate_lods',         text='Generate LODs',         icon='MOD_DECIM')
-        col.operator('et.consolidate_materials', text='Consolidate Materials', icon='MATERIAL')
         col.operator('et.place_reference_image', text='Place Reference Image', icon='IMAGE_REFERENCE')
         col.operator('et.scene_snapshot',        text='Scene Snapshot',        icon='FILE_TICK')
 
@@ -3176,13 +5143,272 @@ class ET_PT_AnalysisPanel(bpy.types.Panel):
 
         box = layout.box()
         box.label(text="UV", icon='UV')
-        box.operator('et.stacked_uv_detector', text='Stacked UV Detector', icon='UV_SYNC_SELECT')
+        col = box.column(align=True)
+        col.operator('et.uv_health',          text='UV Health Check',    icon='UV')
+        col.operator('et.stacked_uv_detector', text='Stacked UV Detector', icon='UV_SYNC_SELECT')
 
         box = layout.box()
         box.label(text="Statistics", icon='INFO')
         row = box.row(align=True)
         row.operator('et.scene_stats',      text='Scene Stats',      icon='INFO')
         row.operator('et.collection_stats', text='Collection Stats', icon='SPREADSHEET')
+
+
+# ---------------------------------------------------------------------------
+# N-Panel: ET: Blend Mask  (only while a blended material is active)
+# ---------------------------------------------------------------------------
+
+class ET_PT_BlendMaskPanel(bpy.types.Panel):
+    bl_label       = "Blend Mask"
+    bl_idname      = "ET_PT_blend_mask_panel"
+    bl_space_type  = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category    = 'EasyTasks'
+    bl_order       = 4
+
+    @classmethod
+    def poll(cls, context):
+        return _active_blend_mask(context) is not None
+
+    def draw(self, context):
+        layout = self.layout
+        node   = _active_blend_mask(context)
+        if node is None:                       # material swapped mid-draw
+            return
+
+        obj = context.active_object
+        layout.label(text=obj.active_material.name, icon='MATERIAL')
+
+        box = layout.box()
+        box.label(text="Preset", icon='PRESET')
+        box.operator_menu_enum('et.apply_blend_preset', 'preset',
+                               text="Load a Preset")
+
+        def slider(parent, socket_name, label):
+            socket = node.inputs.get(socket_name)
+            if socket is not None:
+                parent.prop(socket, 'default_value', text=label)
+
+        box = layout.box()
+        box.label(text="Mask", icon='MOD_MASK')
+        col = box.column(align=True)
+        slider(col, 'Amount',      'Overlay Amount')
+        slider(col, 'Softness',    'Softness')
+        slider(col, 'Noise Scale', 'Noise Scale')
+
+        box = layout.box()
+        box.label(text="Direction", icon='NORMALS_FACE')
+        row = box.row(align=True)
+        row.operator('et.set_blend_axis', text='Up').axis   = 'UP'
+        row.operator('et.set_blend_axis', text='Down').axis = 'DOWN'
+        row = box.row(align=True)
+        row.operator('et.set_blend_axis', text='+X').axis = 'X'
+        row.operator('et.set_blend_axis', text='-X').axis = 'NEG_X'
+        row.operator('et.set_blend_axis', text='+Y').axis = 'Y'
+        row.operator('et.set_blend_axis', text='-Y').axis = 'NEG_Y'
+        col = box.column(align=True)
+        slider(col, 'Gradient',          'Gradient / Face Angle')
+        slider(col, 'Directionality',    'Strength')
+        slider(col, 'Direction Falloff', 'Falloff')
+
+        box = layout.box()
+        box.label(text="Paint", icon='BRUSH_DATA')
+        painting = obj.mode in {'TEXTURE_PAINT', 'VERTEX_PAINT'}
+        box.operator('et.paint_blend_mask',
+                     text='Painting  ●  ON' if painting else 'Paint Blend Mask',
+                     icon='BRUSH_DATA',
+                     depress=painting)
+        slider(box, 'Paint Influence', 'Paint Influence')
+
+        # Unsaved paint renders as an unpainted mask, so say so where it will
+        # be seen rather than leaving it to be discovered at render time.
+        image = _blend_paint_image(node)
+        if image is not None and image.is_dirty:
+            box.label(text="Unsaved paint — renders blank", icon='ERROR')
+            box.operator('et.save_blend_mask', text='Save Painted Mask',
+                         icon='FILE_TICK')
+
+
+# ---------------------------------------------------------------------------
+# UV Health — what actually stops a texture or a paint mask behaving
+# ---------------------------------------------------------------------------
+
+def _uv_report(obj, texture_px=2048):
+    """
+    Measure one object's UVs. Returns a dict, or None if it has no geometry.
+
+    Texel density is the number that matters across a set of assets: two walls
+    at different densities show visibly different texture detail side by side,
+    and nothing in Blender tells you until you look at a render.
+    """
+    mesh = getattr(obj, 'data', None)
+    polygons = getattr(mesh, 'polygons', None)
+    if not polygons:
+        return None
+
+    layer = mesh.uv_layers.active
+    entry = {'name': obj.name, 'faces': len(polygons), 'layers':
+             len(mesh.uv_layers), 'uv': layer.name if layer else None,
+             'density': 0.0, 'tiles': False, 'degenerate': 0, 'span': 0.0}
+
+    scale = obj.matrix_world.to_scale()
+    # Polygon areas are local, so scale them into world units before comparing
+    # against UV area — otherwise every scaled object reads as a different density.
+    factor = (abs(scale.x) + abs(scale.y) + abs(scale.z)) / 3.0
+    world_area = sum(poly.area for poly in polygons) * (factor ** 2)
+    entry['area'] = world_area
+
+    if layer is None:
+        return entry
+
+    count = len(layer.data)
+    flat  = [0.0] * (count * 2)
+    layer.data.foreach_get('uv', flat)
+    us, vs = flat[0::2], flat[1::2]
+    entry['span']  = max(max(us) - min(us), max(vs) - min(vs))
+    entry['tiles'] = (min(us) < -0.001 or max(us) > 1.001
+                      or min(vs) < -0.001 or max(vs) > 1.001)
+
+    uv_area = 0.0
+    for poly in polygons:
+        start, total = poly.loop_start, poly.loop_total
+        if total < 3:
+            continue
+        # fan triangulation, twice the signed area by the shoelace formula
+        first = start
+        area = 0.0
+        for offset in range(1, total - 1):
+            ax, ay = flat[first * 2],              flat[first * 2 + 1]
+            bx, by = flat[(start + offset) * 2],   flat[(start + offset) * 2 + 1]
+            cx, cy = flat[(start + offset + 1) * 2], flat[(start + offset + 1) * 2 + 1]
+            area += abs((bx - ax) * (cy - ay) - (cx - ax) * (by - ay)) * 0.5
+        if area <= 1e-12:
+            entry['degenerate'] += 1
+        uv_area += area
+
+    entry['uv_area'] = uv_area
+    if world_area > 1e-9 and uv_area > 1e-12:
+        # pixels per metre, given a square texture of texture_px
+        entry['density'] = (uv_area ** 0.5) * texture_px / (world_area ** 0.5)
+    return entry
+
+
+def _uv_findings(reports):
+    """Turn per-object measurements into the things worth saying."""
+    findings = []
+    missing = [r['name'] for r in reports if r['uv'] is None]
+    if missing:
+        findings.append(('ERROR', f"{len(missing)} object(s) have no UV map: "
+                                  f"{', '.join(missing[:3])}"
+                                  f"{' …' if len(missing) > 3 else ''}"))
+
+    degenerate = [r['name'] for r in reports if r['degenerate']]
+    if degenerate:
+        findings.append(('ERROR',
+                         f"{len(degenerate)} object(s) have zero-area UV faces — "
+                         f"they cannot be textured or painted"))
+
+    tiling = [r for r in reports if r['tiles']]
+    if tiling:
+        worst = max(tiling, key=lambda r: r['span'])
+        findings.append(('INFO',
+                         f"{len(tiling)} object(s) tile past 0-1 (up to "
+                         f"{worst['span']:.1f}x on {worst['name']}) — right for "
+                         f"textures, but a paint mask needs its own UV layer"))
+
+    densities = [r['density'] for r in reports if r['density'] > 0.0]
+    if len(densities) > 1:
+        ordered = sorted(densities)
+        median  = ordered[len(ordered) // 2]
+        spread  = max(densities) / max(min(densities), 1e-9)
+        outliers = [r['name'] for r in reports
+                    if r['density'] > 0.0
+                    and (r['density'] > median * 2.0 or r['density'] < median / 2.0)]
+        level = 'WARNING' if outliers else 'OK'
+        message = (f"Texel density {min(densities):.0f}–{max(densities):.0f} px/m "
+                   f"(median {median:.0f}, {spread:.1f}x spread)")
+        if outliers:
+            message += (f" — off by more than 2x: "
+                        f"{', '.join(outliers[:3])}"
+                        f"{' …' if len(outliers) > 3 else ''}")
+        findings.append((level, message))
+    elif densities:
+        findings.append(('OK', f"Texel density {densities[0]:.0f} px/m"))
+
+    if not findings:
+        findings.append(('OK', "Nothing to flag"))
+    return findings
+
+
+class ET_OT_UVHealth(bpy.types.Operator):
+    bl_idname  = "et.uv_health"
+    bl_label   = "UV Health Check"
+    bl_description = ("Check the selection for missing UVs, zero-area faces, "
+                      "tiling, and texel density that varies between objects")
+    bl_options = {"REGISTER"}
+
+    texture_px: bpy.props.EnumProperty(
+        name="Texture Size",
+        items=[('1024', "1K", ""), ('2048', "2K", ""),
+               ('4096', "4K", ""), ('8192', "8K", "")],
+        default='2048',
+        description="Density is quoted in pixels per metre, so it needs to know "
+                    "what size texture you intend to use")
+
+    _findings = []
+    _reports  = []
+
+    @classmethod
+    def poll(cls, context):
+        return any(o.type == 'MESH' for o in context.selected_objects)
+
+    def invoke(self, context, event):
+        self._gather(context)
+        return context.window_manager.invoke_popup(self, width=460)
+
+    def _gather(self, context):
+        size = int(self.texture_px)
+        reports = [_uv_report(o, size) for o in context.selected_objects
+                   if o.type == 'MESH']
+        self._reports  = [r for r in reports if r]
+        self._findings = _uv_findings(self._reports)
+
+    def execute(self, context):
+        self._gather(context)
+        worst = 'INFO'
+        for level, _message in self._findings:
+            if level == 'ERROR':
+                worst = 'ERROR'
+                break
+            if level == 'WARNING':
+                worst = 'WARNING'
+        summary = "; ".join(m for _l, m in self._findings)
+        self.report({'WARNING'} if worst != 'INFO' else {'INFO'},
+                    summary[:400])
+        return {"FINISHED"}
+
+    def draw(self, context):
+        layout = self.layout
+        box = layout.box()
+        box.label(text="UV Health", icon='UV')
+        box.prop(self, 'texture_px')
+
+        icons = {'ERROR': 'ERROR', 'WARNING': 'ERROR', 'INFO': 'INFO',
+                 'OK': 'CHECKMARK'}
+        col = box.column(align=True)
+        for level, message in self._findings:
+            col.label(text=message, icon=icons.get(level, 'INFO'))
+
+        if not self._reports:
+            return
+        box = layout.box()
+        box.label(text=f"{len(self._reports)} object(s)", icon='OBJECT_DATA')
+        col = box.column(align=True)
+        for entry in sorted(self._reports,
+                            key=lambda r: r['density'], reverse=True)[:12]:
+            uv = entry['uv'] or "no UV map"
+            col.label(text=f"{entry['name']:<24} {entry['density']:>7.0f} px/m   "
+                           f"{entry['faces']:>6} faces   {uv}")
 
 
 # ---------------------------------------------------------------------------
@@ -3225,6 +5451,12 @@ classes = (
     # Scene stats / materials / LODs
     ET_OT_SceneStats,
     ET_OT_ConsolidateMaterials,
+    ET_OT_MegascansMaterial,
+    ET_OT_BlendMaterials,
+    ET_OT_ApplyBlendPreset,
+    ET_OT_SetBlendAxis,
+    ET_OT_SaveBlendMask,
+    ET_OT_PaintBlendMask,
     ET_OT_GenerateLODs,
     ET_OT_OriginToBase,
     ET_MT_OriginMenu,
@@ -3241,6 +5473,7 @@ classes = (
     ET_OT_FaceStretchAnalyzer,
     ET_OT_SmartDuplicate,
     ET_OT_StackedUVDetector,
+    ET_OT_UVHealth,
     # Menus / pie
     ET_MT_SelectMenu,
     ET_MT_OrganizeMenu,
@@ -3251,6 +5484,7 @@ classes = (
     ET_PT_ScenePanel,
     ET_PT_ToolsPanel,
     ET_PT_AnalysisPanel,
+    ET_PT_BlendMaskPanel,
 )
 
 
