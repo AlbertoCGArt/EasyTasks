@@ -80,16 +80,64 @@ def _obj_name_parts(obj):
 _TYPE_COLLECTION = {'LIGHT': 'LIGHTS', 'CAMERA': 'CAMERAS'}
 
 
-def _build_route_index():
+def _editable(coll):
+    """A collection whose object list can be changed: not from a library."""
+    return coll.library is None and getattr(coll, 'override_library', None) is None
+
+
+def _scene_collections(scene):
+    """
+    Every editable collection in this scene's tree, in tree order.
+
+    Routing used to search all of bpy.data.collections, which includes other
+    scenes' collections, orphans, and library-linked ones. Linking an object
+    into the first two takes it out of this scene; the third refuses the link
+    after the object had already been unlinked, leaving it in no collection at
+    all — and an object in no collection is gone on save.
+    """
+    found, seen, stack = [], set(), list(scene.collection.children)
+    while stack:
+        coll = stack.pop(0)
+        key = coll.as_pointer()
+        if key in seen:
+            continue
+        seen.add(key)
+        if _editable(coll):
+            found.append(coll)
+        stack.extend(coll.children)
+    return found
+
+
+def _move_object(obj, target, scene):
+    """
+    Move obj into target, leaving it there and only there within this scene.
+
+    Link first, unlink after, so a link that fails cannot leave the object
+    homeless. Memberships outside this scene's tree — another scene, the rigid
+    body world — are left alone: they are not this scene's to rearrange.
+    """
+    if obj.name not in target.objects:
+        target.objects.link(obj)
+    local = {c.as_pointer() for c in _scene_collections(scene)}
+    local.add(scene.collection.as_pointer())
+    for current in list(obj.users_collection):
+        if (current != target and current.as_pointer() in local
+                and _editable(current)):
+            current.objects.unlink(obj)
+
+
+def _build_route_index(scene=None):
     """
     Build {keyword: Collection} once, so routing N objects costs O(N) name-token
     lookups instead of O(N × collections) string comparisons.
 
     Keys are the lowercased collection name plus its naive singular, so a
-    collection 'ROCKS' matches an object named 'Rock_Pile_01'.
+    collection 'ROCKS' matches an object named 'Rock_Pile_01'. Only collections
+    in this scene's tree are candidates — see _scene_collections.
     """
+    scene = scene or bpy.context.scene
     index = {}
-    for coll in bpy.data.collections:
+    for coll in _scene_collections(scene):
         lower = coll.name.lower()
         index.setdefault(lower, coll)
         if lower.endswith('s') and len(lower) > 2:
@@ -97,9 +145,9 @@ def _build_route_index():
     return index
 
 
-def _find_target_collection(obj, index=None):
+def _find_target_collection(obj, index=None, scene=None):
     """
-    Return an existing bpy.data collection to route obj into, or None.
+    Return a collection in this scene to route obj into, or None.
 
     Priority:
       1. Object type  (LIGHT → LIGHTS, CAMERA → CAMERAS)
@@ -107,22 +155,24 @@ def _find_target_collection(obj, index=None):
       3. Any existing collection matched by name / simple singular
 
     Pass a prebuilt `index` from _build_route_index() when routing in bulk.
+    Every lookup goes through the index, so nothing outside the scene's own
+    editable tree can be chosen.
     """
+    if index is None:
+        index = _build_route_index(scene)
+
     coll_name = _TYPE_COLLECTION.get(obj.type)
     if coll_name:
-        coll = bpy.data.collections.get(coll_name)
+        coll = index.get(coll_name.lower())
         if coll:
             return coll
-
-    if index is None:
-        index = _build_route_index()
 
     parts = _obj_name_parts(obj)
 
     for part in parts:
         alias = _KEYWORD_ALIASES.get(part)
         if alias:
-            coll = bpy.data.collections.get(alias)
+            coll = index.get(alias.lower())
             if coll:
                 return coll
 
@@ -156,6 +206,38 @@ def _prefs():
         return bpy.context.preferences.addons[__name__].preferences
     except (KeyError, AttributeError):
         return None
+
+
+@bpy.app.handlers.persistent
+def _reset_route_snapshot(*_args):
+    """
+    Forget which objects auto-route has seen. Runs after load, undo and redo.
+
+    'New' only means 'not in the last snapshot'. A file opened afterwards
+    usually has a scene called 'Scene' too, so its objects were compared against
+    the previous file's names and silently moved on the first click; an object
+    brought back by Ctrl+Z was re-routed the same way. Clearing the snapshot
+    makes the next depsgraph tick re-seed it instead of routing.
+    """
+    global _route_pending
+    _known_objects.clear()
+    _route_pending = False
+
+
+@bpy.app.handlers.persistent
+def _reset_session_state(*_args):
+    """
+    Drop everything held for the previous file. Runs after load only.
+
+    Isolation, preview shading, Face Stretch and visibility bookmarks are all
+    keyed by names or pointers from the file they were made in; carried into
+    the next file they 'restore' state onto unrelated collections and meshes.
+    """
+    _reset_route_snapshot()
+    _isolation_state.clear()
+    _shading_state.clear()
+    _stretch_state.clear()
+    _vis_bookmarks.clear()
 
 
 @bpy.app.handlers.persistent
@@ -202,19 +284,23 @@ def _auto_route_new_objects(scene, depsgraph):
         s = bpy.data.scenes.get(scene_name)
         if s is None:
             return
-        index = _build_route_index()
+        index = _build_route_index(s)
         for name in new_names:
             obj = s.objects.get(name)
             if obj is None:
                 continue
-            target = _find_target_collection(obj, index)
+            target = _find_target_collection(obj, index, s)
             if target is None:
                 continue
             current_colls = list(obj.users_collection)
             if len(current_colls) != 1 or current_colls[0] == target:
                 continue
-            current_colls[0].objects.unlink(obj)
-            target.objects.link(obj)
+            try:
+                _move_object(obj, target, s)
+            except RuntimeError:
+                # One object refusing (linked data, say) must not abort the
+                # rest of the batch from inside a timer nobody sees fail.
+                continue
 
     bpy.app.timers.register(_route, first_interval=0.0)
 
@@ -874,29 +960,32 @@ class ET_OT_ArrangeScene(bpy.types.Operator):
 
     def execute(self, context):
         scene = context.scene
-
-        def unlink_all(obj):
-            for c in list(obj.users_collection):
-                c.objects.unlink(obj)
+        local = {c.name: c for c in _scene_collections(scene)}
 
         def ensure_collection(name):
-            coll = bpy.data.collections.get(name)
-            if not coll:
+            # Only reuse a collection that is already in this scene and
+            # editable; anything else of that name gets a fresh local one.
+            coll = local.get(name)
+            if coll is None:
                 coll = bpy.data.collections.new(name)
-            if coll.name not in {c.name for c in scene.collection.children}:
                 scene.collection.children.link(coll)
+                local[coll.name] = coll
             return coll
 
-        index = _build_route_index()
+        index = _build_route_index(scene)
 
-        routed         = 0
-        prefix_objects = []
-        for obj in scene.objects:
-            target = _find_target_collection(obj, index)
+        routed, skipped = 0, 0
+        prefix_objects  = []
+        # Snapshot first: moving objects while iterating scene.objects
+        # reorders what the loop is walking.
+        for obj in list(scene.objects):
+            target = _find_target_collection(obj, index, scene)
             if target:
-                unlink_all(obj)
-                target.objects.link(obj)
-                routed += 1
+                try:
+                    _move_object(obj, target, scene)
+                    routed += 1
+                except RuntimeError:
+                    skipped += 1
             else:
                 prefix_objects.append(obj)
 
@@ -909,11 +998,17 @@ class ET_OT_ArrangeScene(bpy.types.Operator):
         for prefix, group in groups.items():
             coll = ensure_collection(prefix)
             for obj in group:
-                unlink_all(obj)
-                coll.objects.link(obj)
+                try:
+                    _move_object(obj, coll, scene)
+                except RuntimeError:
+                    skipped += 1
 
-        self.report({'INFO'},
-                    f"Routed {routed} object(s), grouped {len(groups)} by name")
+        message = f"Routed {routed} object(s), grouped {len(groups)} by name"
+        if skipped:
+            self.report({'WARNING'},
+                        f"{message} — {skipped} could not be moved (linked data)")
+        else:
+            self.report({'INFO'}, message)
         return {"FINISHED"}
 
 
@@ -1118,16 +1213,16 @@ def _assign_to_collection(objects, coll, move):
     """
     Link objects into coll. When `move`, also unlink them from everywhere else.
 
-    Linking happens after unlinking within the same operator call, so an object
-    is never left without a collection.
+    Links before it unlinks, so an object is never left without a collection
+    when a link is refused, and a move only rearranges this scene's tree — the
+    object keeps its place in other scenes and in the rigid body world.
     """
+    scene = bpy.context.scene
     count = 0
     for obj in objects:
         if move:
-            for current in list(obj.users_collection):
-                if current is not coll:
-                    current.objects.unlink(obj)
-        if obj.name not in coll.objects:
+            _move_object(obj, coll, scene)
+        elif obj.name not in coll.objects:
             coll.objects.link(obj)
         count += 1
     return count
@@ -1541,7 +1636,7 @@ def _suggested_collection(context):
             return None
         obj = selected[0]
 
-    target = _find_target_collection(obj)
+    target = _find_target_collection(obj, scene=context.scene)
     if target is None:
         return None
     # Pointless to suggest the collection everything is already in.
@@ -5517,6 +5612,15 @@ _KEYMAP_SPEC = (
 )
 
 
+# Undo and redo only invalidate the auto-route snapshot; loading a file
+# invalidates every piece of state kept for the previous one.
+_STATE_HANDLERS = (
+    ('load_post', _reset_session_state),
+    ('undo_post', _reset_route_snapshot),
+    ('redo_post', _reset_route_snapshot),
+)
+
+
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
@@ -5540,6 +5644,10 @@ def register():
     _known_objects.clear()
     _route_pending_reset()
     bpy.app.handlers.depsgraph_update_post.append(_auto_route_new_objects)
+    for list_name, handler in _STATE_HANDLERS:
+        handlers = getattr(bpy.app.handlers, list_name)
+        if handler not in handlers:
+            handlers.append(handler)
 
 
 def _route_pending_reset():
@@ -5550,6 +5658,10 @@ def _route_pending_reset():
 def unregister():
     if _auto_route_new_objects in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.remove(_auto_route_new_objects)
+    for list_name, handler in _STATE_HANDLERS:
+        handlers = getattr(bpy.app.handlers, list_name)
+        if handler in handlers:
+            handlers.remove(handler)
 
     for km, kmi in addon_keymaps.values():
         try:

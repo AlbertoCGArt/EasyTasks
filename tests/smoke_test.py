@@ -2164,6 +2164,125 @@ check("batch export applies only the ticked transforms",
       batch_export_applies_only_what_is_ticked)
 
 
+def auto_route_forgets_the_last_file():
+    """
+    _known_objects was never cleared on File > Open or undo, so every object of
+    the next file — or one brought back by Ctrl+Z — counted as 'new' and was
+    silently moved on the first click, in a timer nothing could undo.
+    """
+    for handlers, wanted in ((bpy.app.handlers.load_post, '_reset_session_state'),
+                             (bpy.app.handlers.undo_post, '_reset_route_snapshot'),
+                             (bpy.app.handlers.redo_post, '_reset_route_snapshot')):
+        assert any(getattr(h, '__name__', '') == wanted for h in handlers), \
+            f"{wanted} missing from {handlers}"
+
+    # simulate a stale snapshot left over from a previous file with the same
+    # scene name: every object here would otherwise look new
+    et._known_objects[scene.name] = {"SomethingFromTheLastFile"}
+    et._isolation_state["stale"] = True
+    et._reset_route_snapshot(None)
+    assert scene.name not in et._known_objects
+    assert not et._route_pending
+
+    registered = []
+    real_register = bpy.app.timers.register
+    bpy.app.timers.register = lambda fn, **kw: registered.append(fn)
+    try:
+        et._auto_route_new_objects(scene, None)   # first tick re-seeds only
+    finally:
+        bpy.app.timers.register = real_register
+    assert not registered, "routing was queued straight after a reset"
+    assert scene.name in et._known_objects, "snapshot was not re-seeded"
+
+    et._reset_session_state(None)
+    assert not et._isolation_state, "isolation state survived a file load"
+
+check("auto-route forgets the previous file and undo",
+      auto_route_forgets_the_last_file)
+
+
+def routing_never_strands_an_object():
+    """
+    Routing searched every collection in bpy.data — other scenes, orphans,
+    library-linked ones — and unlinked before linking. A link that failed, or a
+    target outside this scene, left the object in no collection: gone on save.
+    """
+    _ensure_object_mode()
+    elsewhere = bpy.data.scenes.new("OtherScene")
+    foreign = bpy.data.collections.new("CRATES")       # only in the other scene
+    elsewhere.collection.children.link(foreign)
+    orphan = bpy.data.collections.new("BARRELS")       # in no scene at all
+
+    crate = bpy.data.objects.new("Crate_Wood_01", bpy.data.meshes.new("CrateM1"))
+    barrel = bpy.data.objects.new("Barrel_Old_01", bpy.data.meshes.new("BarrelM1"))
+    for obj in (crate, barrel):
+        scene.collection.objects.link(obj)
+
+    index = et._build_route_index(scene)
+    assert et._find_target_collection(crate, index, scene) is None, \
+        "routed into a collection that lives in another scene"
+    assert et._find_target_collection(barrel, index, scene) is None, \
+        "routed into a collection that is in no scene"
+
+    # Arrange Scene uses the same matcher; both objects must still be here
+    bpy.ops.object.select_all(action='DESELECT')
+    bpy.ops.et.arrange_scene()
+    for obj in (crate, barrel):
+        assert obj.users_collection, f"{obj.name} was left in no collection"
+        assert obj.name in scene.objects, f"{obj.name} left the scene"
+    assert crate.name not in foreign.objects
+
+    # a move keeps memberships outside this scene, e.g. another scene's tree
+    shared = bpy.data.objects.new("SharedProp", bpy.data.meshes.new("SharedM"))
+    scene.collection.objects.link(shared)
+    elsewhere.collection.objects.link(shared)
+    dest = bpy.data.collections.new("MoveHere")
+    scene.collection.children.link(dest)
+    et._assign_to_collection([shared], dest, True)
+    assert shared.name in dest.objects
+    assert shared.name in elsewhere.collection.objects, \
+        "moving stripped the object out of another scene"
+    assert shared.name not in scene.collection.objects
+
+    bpy.data.scenes.remove(elsewhere)
+    bpy.data.collections.remove(orphan)
+
+check("routing never strands an object", routing_never_strands_an_object)
+
+
+def routing_ignores_library_collections():
+    """
+    The case that actually lost data: a library-linked collection in the scene
+    with a matching name. link() into it raises — and the object had already
+    been unlinked from its own collection.
+    """
+    import tempfile
+    _ensure_object_mode()
+    lib_path = _os.path.join(tempfile.mkdtemp(prefix="et_lib_"), "kit.blend")
+    source = bpy.data.collections.new("PIPES")
+    bpy.data.libraries.write(lib_path, {source})
+    bpy.data.collections.remove(source)
+
+    with bpy.data.libraries.load(lib_path, link=True) as (src, dst):
+        dst.collections = ["PIPES"]
+    linked = dst.collections[0]
+    scene.collection.children.link(linked)
+    assert linked.library is not None, "fixture did not produce linked data"
+
+    pipe = bpy.data.objects.new("Pipe_Rusty_01", bpy.data.meshes.new("PipeM"))
+    scene.collection.objects.link(pipe)
+    assert et._find_target_collection(pipe, scene=scene) is None, \
+        "picked a library collection the object cannot be linked into"
+
+    bpy.ops.et.arrange_scene()
+    assert pipe.users_collection, "Arrange Scene left the object in no collection"
+    assert pipe.name in scene.objects
+    notes.append("routing skips library-linked collections")
+
+check("routing ignores library-linked collections",
+      routing_ignores_library_collections)
+
+
 # --- unregister ------------------------------------------------------------
 check("unregister()", et.unregister)
 
