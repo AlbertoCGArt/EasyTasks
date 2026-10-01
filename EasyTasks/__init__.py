@@ -511,12 +511,13 @@ class ET_OT_BatchExport(bpy.types.Operator):
             base    = self.name if self.name else obj.name
             obj.name = f"{self.prefix}{sep_pre}{base}{sep_suf}{self.suffix}"
 
-        if self.apply_scale:
-            bpy.ops.object.transform_apply(scale=True)
-        if self.apply_rotation:
-            bpy.ops.object.transform_apply(rotation=True)
-        if self.apply_location:
-            bpy.ops.object.transform_apply(location=True)
+        # One call with every flag explicit: transform_apply defaults all three
+        # to True, so transform_apply(scale=True) also baked rotation and
+        # location and the Rotation / Location checkboxes did nothing.
+        if self.apply_scale or self.apply_rotation or self.apply_location:
+            bpy.ops.object.transform_apply(location=self.apply_location,
+                                           rotation=self.apply_rotation,
+                                           scale=self.apply_scale)
 
         if self.export_fbx or self.export_obj or self.export_glb:
             basedir = os.path.dirname(bpy.data.filepath)
@@ -588,6 +589,23 @@ class ET_MT_InteractionModePie(bpy.types.Menu):
 # ---------------------------------------------------------------------------
 # Menus (Modifiers, UV/Sharp, Asset, Link/Transfer, FavTools)
 # ---------------------------------------------------------------------------
+
+def _transform_apply_buttons(layout, texts):
+    """
+    Apply Scale / Rotation / Location buttons, labelled with `texts` in that order.
+
+    object.transform_apply defaults location, rotation and scale all to True and
+    remembers whatever was used last, so a button that only sets its own flag
+    applies all three — 'Apply Scale' also zeroed rotation and moved the origin
+    to the world origin. Blender's own Object > Apply menu sets every flag for
+    the same reason, and so does this.
+    """
+    for text, flags in zip(texts, ((False, False, True),
+                                   (False, True,  False),
+                                   (True,  False, False))):
+        op = layout.operator('object.transform_apply', text=text)
+        op.location, op.rotation, op.scale = flags
+
 
 class ET_MT_ModifiersMenu(bpy.types.Menu):
     bl_idname = "ET_MT_modifiers_menu"
@@ -673,9 +691,8 @@ class ET_MT_FavToolsMenu(bpy.types.Menu):
         layout.separator()
         layout.menu('ET_MT_uv_sharp_menu', text='UVs | Sharp Edge', icon='UV')
         layout.separator()
-        layout.operator('object.transform_apply', text='Apply Scale').scale       = True
-        layout.operator('object.transform_apply', text='Apply Rotation').rotation = True
-        layout.operator('object.transform_apply', text='Apply Location').location = True
+        _transform_apply_buttons(layout, ('Apply Scale', 'Apply Rotation',
+                                          'Apply Location'))
         layout.separator()
         layout.operator('export_scene.fbx',  text='Export FBX', icon='EXPORT').use_selection = True
         layout.operator('wm.obj_export',     text='Export OBJ', icon='EXPORT')
@@ -4955,9 +4972,7 @@ class ET_MT_EasyTasksPie(bpy.types.Menu):
         box = pie.box()
         col = box.column(align=True)
         col.label(text="Apply Transform", icon='OBJECT_DATA')
-        col.operator('object.transform_apply', text='Scale').scale       = True
-        col.operator('object.transform_apply', text='Rotation').rotation = True
-        col.operator('object.transform_apply', text='Location').location = True
+        _transform_apply_buttons(col, ('Scale', 'Rotation', 'Location'))
         col.separator()
         col.label(text="Shading", icon='NORMALS_FACE')
         col.operator('object.shade_smooth', text='Shade Smooth', icon='MESH_CIRCLE')

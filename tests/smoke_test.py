@@ -2095,6 +2095,75 @@ check("paint mask refuses a material with no mask",
       paint_mask_needs_a_blend_material)
 
 
+# --- release blockers -------------------------------------------------------
+
+def apply_buttons_set_all_three_flags():
+    """
+    object.transform_apply defaults location, rotation AND scale to True. A
+    button that only sets its own flag applies all three: 'Apply Scale' also
+    zeroed the rotation and moved the origin to the world origin.
+    """
+    import types
+
+    class FakeLayout:
+        def __init__(self):
+            self.calls = []
+
+        def operator(self, idname, **kwargs):
+            props = types.SimpleNamespace()
+            self.calls.append((idname, kwargs, props))
+            return props
+
+    layout = FakeLayout()
+    et._transform_apply_buttons(layout, ("Scale", "Rotation", "Location"))
+    expected = {"Scale":    (False, False, True),
+                "Rotation": (False, True,  False),
+                "Location": (True,  False, False)}
+    assert len(layout.calls) == 3, layout.calls
+    for idname, kwargs, props in layout.calls:
+        assert idname == 'object.transform_apply', idname
+        flags = (props.location, props.rotation, props.scale)
+        assert flags == expected[kwargs['text']], (kwargs['text'], flags)
+
+    # and nothing in the add-on builds one of these buttons by hand any more
+    source = open(SRC, encoding='utf-8').read()
+    raw = source.count("operator('object.transform_apply'")
+    assert raw == 1, f"{raw} transform_apply buttons bypass the helper"
+
+check("apply buttons set all three transform flags",
+      apply_buttons_set_all_three_flags)
+
+
+def batch_export_applies_only_what_is_ticked():
+    """Rotation and Location unticked must leave rotation and location alone."""
+    import math
+    _ensure_object_mode()
+    mesh = bpy.data.meshes.new("ExportProbeMesh")
+    mesh.from_pydata([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [], [(0, 1, 2)])
+    obj = bpy.data.objects.new("ExportProbe", mesh)
+    scene.collection.objects.link(obj)
+    obj.location = (3.0, 4.0, 5.0)
+    obj.rotation_euler = (0.0, 0.0, math.radians(45))
+    obj.scale = (2.0, 2.0, 2.0)
+
+    bpy.ops.object.select_all(action='DESELECT')
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.et.batch_export('EXEC_DEFAULT', export_fbx=False, export_obj=False,
+                            export_glb=False, apply_scale=True,
+                            apply_rotation=False, apply_location=False)
+
+    assert tuple(round(v, 5) for v in obj.scale) == (1.0, 1.0, 1.0), obj.scale[:]
+    assert abs(obj.rotation_euler.z - math.radians(45)) < 1e-5, \
+        f"rotation was applied: {obj.rotation_euler[:]}"
+    assert tuple(round(v, 5) for v in obj.location) == (3.0, 4.0, 5.0), \
+        f"location was applied: {obj.location[:]}"
+    bpy.data.objects.remove(obj)
+
+check("batch export applies only the ticked transforms",
+      batch_export_applies_only_what_is_ticked)
+
+
 # --- unregister ------------------------------------------------------------
 check("unregister()", et.unregister)
 
