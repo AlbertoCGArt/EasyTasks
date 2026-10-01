@@ -42,7 +42,9 @@ All notable changes to Easy Tasks are recorded here.
   as `ET_BlendPaintUV`, wired to the mask through a UV Map node and made the
   active layer for painting. The textures keep the tiled layer untouched, since
   they read the active *render* UV map and painting uses the active one. A mesh
-  whose UVs already sit inside 0-1 gets no extra layer.
+  whose UVs already sit inside 0-1 gets the same layer as a plain copy: the UV
+  Map node lives in a material many objects share, so the name has to mean the
+  same thing on all of them.
 
   Because that layer is looked up by name, every object on the material gets
   it, not only the one paint mode was entered on. Otherwise a floor built from

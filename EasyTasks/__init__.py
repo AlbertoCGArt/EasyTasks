@@ -3062,7 +3062,15 @@ def _paint_uv_layer(obj):
     *render* UV map, while painting goes through the active one, and those are
     separate flags.
 
-    Returns the layer to paint through, or None if the mesh has no UVs.
+    Every object gets the layer under the same name, even one whose UVs are
+    already inside 0-1 (it gets a plain copy). The mask is sampled through a UV
+    Map node in the material, which every object on that material shares; a
+    name that was one object's own layer meant a tiled layer, or nothing, on
+    the others — so their paint repeated or vanished.
+
+    Returns the layer to paint through, or None if the mesh has no UVs. At
+    Blender's eight-layer limit it returns None too: there is no consistent
+    layer to give, and painting through a mismatched one is the bug above.
     """
     mesh   = getattr(obj, 'data', None)
     layers = getattr(mesh, 'uv_layers', None)
@@ -3073,7 +3081,9 @@ def _paint_uv_layer(obj):
     if existing is not None:
         return existing
 
-    source = layers.active or layers[0]
+    # Copy the layout the textures use, not whatever happens to be selected.
+    source = next((l for l in layers if l.active_render), None) \
+        or layers.active or layers[0]
     count  = len(source.data)
     if not count:
         return None
@@ -3085,25 +3095,23 @@ def _paint_uv_layer(obj):
 
     low_u,  high_u = min(flat[0::2]), max(flat[0::2])
     low_v,  high_v = min(flat[1::2]), max(flat[1::2])
+    in_range = (-0.001 <= low_u and high_u <= 1.001
+                and -0.001 <= low_v and high_v <= 1.001)
 
-    # Already inside the tile — nothing repeats, so paint on what is there
-    # rather than adding a layer the file does not need.
-    if -0.001 <= low_u and high_u <= 1.001 and -0.001 <= low_v and high_v <= 1.001:
-        return source
-
-    # One scale for both axes, so the layout keeps its proportions instead of
-    # being squashed to fit the square.
-    span = max(high_u - low_u, high_v - low_v) or 1.0
     previous_active = layers.active
     try:
-        layer = layers.new(name=_BLEND_PAINT_UV, do_init=True)
+        layer = layers.new(name=_BLEND_PAINT_UV, do_init=False)
     except (RuntimeError, TypeError):
-        return source                      # at the 8 layer limit
+        return None                        # at the 8 layer limit
     if layer is None:
-        return source
+        return None
 
-    flat[0::2] = [(u - low_u) / span for u in flat[0::2]]
-    flat[1::2] = [(v - low_v) / span for v in flat[1::2]]
+    if not in_range:
+        # One scale for both axes, so the layout keeps its proportions instead
+        # of being squashed to fit the square.
+        span = max(high_u - low_u, high_v - low_v) or 1.0
+        flat[0::2] = [(u - low_u) / span for u in flat[0::2]]
+        flat[1::2] = [(v - low_v) / span for v in flat[1::2]]
     layer.data.foreach_set('uv', flat)
 
     # new() makes itself active, which would silently switch the UV layer under
@@ -4115,14 +4123,18 @@ class ET_OT_PaintBlendMask(bpy.types.Operator):
         links.new(source.outputs['Color'], node.inputs['Paint'])
 
         # Sample the mask through its own 0-1 layer, never the tiled one the
-        # textures use, or a single stroke shows up in every tile at once.
-        layer = _paint_uv_layer(obj)
-        if layer is not None:
-            uv_node = nodes.new('ShaderNodeUVMap')
-            uv_node.uv_map   = layer.name
-            uv_node.label    = "Paint UVs"
-            uv_node.location = (source.location.x - 220, source.location.y - 60)
-            links.new(uv_node.outputs['UV'], source.inputs['Vector'])
+        # textures use, or a single stroke shows up in every tile at once. The
+        # name is the constant, not whatever this object's layer is called:
+        # the node belongs to a material other objects share too.
+        if _paint_uv_layer(obj) is None:
+            self._cautions.append(
+                f"{obj.name} already has 8 UV maps, so there was no room for the "
+                f"paint layer — strokes may repeat; remove a UV map and paint again")
+        uv_node = nodes.new('ShaderNodeUVMap')
+        uv_node.uv_map   = _BLEND_PAINT_UV
+        uv_node.label    = "Paint UVs"
+        uv_node.location = (source.location.x - 220, source.location.y - 60)
+        links.new(uv_node.outputs['UV'], source.inputs['Vector'])
         return source
 
     def _persist(self, image):

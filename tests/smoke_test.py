@@ -1877,7 +1877,10 @@ def paint_uvs_do_not_tile():
     assert max(datum.uv[0] for datum in mesh.uv_layers["Tiled"].data) == 8.0, \
         "the texture UVs were rescaled"
 
-    # a mesh already inside 0-1 needs no second layer
+    # A mesh already inside 0-1 still gets the paint layer, as an unscaled copy.
+    # It used to keep its own layer name, and the material shared by every
+    # object then looked up a name that meant something different (a tiled
+    # layer) or nothing at all on the others.
     plain = bpy.data.meshes.new("PlainUVMesh")
     plain.from_pydata([(0, 0, 0), (1, 0, 0), (1, 1, 0)], [], [(0, 1, 2)])
     plain.update()
@@ -1886,8 +1889,10 @@ def paint_uvs_do_not_tile():
         datum.uv = uv
     plain_obj = bpy.data.objects.new("PlainUVWall", plain)
     scene.collection.objects.link(plain_obj)
-    assert et._paint_uv_layer(plain_obj).name == "Fine", \
-        "added a paint UV layer to a mesh that did not need one"
+    copy = et._paint_uv_layer(plain_obj)
+    assert copy.name == et._BLEND_PAINT_UV, copy.name
+    assert [tuple(d.uv) for d in copy.data] == [tuple(d.uv) for d in good.data], \
+        "an in-range layout was rescaled instead of copied"
 
     notes.append("paint mask gets its own 0-1 UV layer when the surface tiles")
 
@@ -2423,6 +2428,54 @@ def overlay_only_maps_stay_inside_the_mask():
 
 check("overlay-only maps stay inside the mask",
       overlay_only_maps_stay_inside_the_mask)
+
+
+def paint_uv_name_is_the_same_on_every_object():
+    """
+    Two objects on one blend: one with UVs inside 0-1 painted first, one tiled.
+    The shared UV Map node must name a layer both have, laid out 0-1 on both.
+    """
+    _ensure_object_mode()
+    blend = _run_blend(material_a="Concrete", material_b="DirtGrime",
+                       assign_to_selected=False)
+
+    def quad(name, uv_max):
+        mesh = bpy.data.meshes.new(name + "M")
+        mesh.from_pydata([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)], [],
+                         [(0, 1, 2, 3)])
+        mesh.update()
+        layer = mesh.uv_layers.new(name="UVMap")
+        for datum, uv in zip(layer.data, [(0, 0), (uv_max, 0),
+                                          (uv_max, uv_max), (0, uv_max)]):
+            datum.uv = uv
+        obj = bpy.data.objects.new(name, mesh)
+        scene.collection.objects.link(obj)
+        mesh.materials.append(blend)
+        return obj
+
+    in_range = quad("InRangeTile", 1.0)
+    tiled    = quad("TiledTile", 6.0)
+
+    bpy.ops.object.select_all(action='DESELECT')
+    in_range.select_set(True)
+    bpy.context.view_layer.objects.active = in_range
+    bpy.ops.et.paint_blend_mask('EXEC_DEFAULT', mask_type='IMAGE', resolution='1024')
+    _ensure_object_mode()
+
+    paint = blend.node_tree.nodes[et._MASK_NODE_NAME].inputs['Paint'].links[0].from_node
+    uv_name = paint.inputs['Vector'].links[0].from_node.uv_map
+    assert uv_name == et._BLEND_PAINT_UV, \
+        f"the shared node samples '{uv_name}', which the other objects lack or tile"
+    for obj in (in_range, tiled):
+        layer = obj.data.uv_layers.get(uv_name)
+        assert layer is not None, f"{obj.name} has no '{uv_name}' layer"
+        us = [d.uv[0] for d in layer.data]
+        assert max(us) <= 1.001, f"{obj.name}'s paint layer still tiles: {max(us)}"
+        render = next(l for l in obj.data.uv_layers if l.active_render)
+        assert render.name == "UVMap", f"{obj.name}'s texture UVs were swapped"
+
+check("paint UV name is the same on every object sharing a blend",
+      paint_uv_name_is_the_same_on_every_object)
 
 
 # --- unregister ------------------------------------------------------------
