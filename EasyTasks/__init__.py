@@ -3122,6 +3122,40 @@ def _paint_uv_layer(obj):
     return layer
 
 
+# Linear 0.5 stored as an sRGB byte. Legacy vertex colours hold sRGB bytes that
+# the shader linearises on read, so writing a plain 0.5 would arrive as ~0.21 —
+# an offset of -0.58 that silently drags the whole blend toward the base.
+_SRGB_HALF = 0.7353569830524495
+
+
+def _paint_color_layer(mesh):
+    """
+    Find or create the vertex-colour paint layer, initialised to neutral grey,
+    and make it the one vertex paint writes to.
+
+    Mesh.color_attributes arrived in Blender 3.2; on 3.0 and 3.1 the layer has
+    to be a legacy vertex_colors one. The shader reads both by name through the
+    same Attribute node, so the rest of the blend does not care which it got.
+    """
+    attributes = getattr(mesh, 'color_attributes', None)
+    if attributes is not None:
+        layer = attributes.get(_BLEND_PAINT_ATTR)
+        if layer is None:
+            layer = attributes.new(_BLEND_PAINT_ATTR, 'FLOAT_COLOR', 'CORNER')
+            # float colour attributes are linear, so mid grey is simply 0.5
+            layer.data.foreach_set('color', [0.5, 0.5, 0.5, 1.0] * len(layer.data))
+        attributes.active_color_index = attributes.find(layer.name)
+        return layer
+
+    layer = mesh.vertex_colors.get(_BLEND_PAINT_ATTR)
+    if layer is None:
+        layer = mesh.vertex_colors.new(name=_BLEND_PAINT_ATTR)
+        grey  = [_SRGB_HALF, _SRGB_HALF, _SRGB_HALF, 1.0]
+        layer.data.foreach_set('color', grey * len(layer.data))
+    mesh.vertex_colors.active = layer
+    return layer
+
+
 def _blend_paint_image(node):
     """The image feeding a Blend Mask node's Paint input, if it is one."""
     socket = node.inputs.get('Paint') if node is not None else None
@@ -4091,15 +4125,7 @@ class ET_OT_PaintBlendMask(bpy.types.Operator):
         links = mat.node_tree.links
 
         if self.mask_type == 'VERTEX':
-            mesh = obj.data
-            attr = mesh.color_attributes.get(_BLEND_PAINT_ATTR)
-            if attr is None:
-                attr = mesh.color_attributes.new(_BLEND_PAINT_ATTR,
-                                                 'FLOAT_COLOR', 'CORNER')
-                # mid grey is the neutral value the mask group expects
-                attr.data.foreach_set('color', [0.5, 0.5, 0.5, 1.0] * len(attr.data))
-            mesh.color_attributes.active_color_index = \
-                mesh.color_attributes.find(attr.name)
+            _paint_color_layer(obj.data)
 
             source = nodes.new('ShaderNodeAttribute')
             source.attribute_name = _BLEND_PAINT_ATTR

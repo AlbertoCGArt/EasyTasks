@@ -32,6 +32,34 @@ def check(label, fn):
 
 print(f"Blender {bpy.app.version_string}")
 
+# Mesh.color_attributes arrived in 3.2. bl_info claims 3.0, so the tests reach
+# colour layers through these rather than assuming the newer API.
+LEGACY_COLOURS = 'color_attributes' not in bpy.types.Mesh.bl_rna.properties
+
+
+def _colour_layers(mesh):
+    return mesh.vertex_colors if LEGACY_COLOURS else mesh.color_attributes
+
+
+def _new_colour_layer(mesh, name):
+    if LEGACY_COLOURS:
+        return mesh.vertex_colors.new(name=name)
+    return mesh.color_attributes.new(name, 'FLOAT_COLOR', 'CORNER')
+
+
+def _active_colour_index(mesh):
+    if LEGACY_COLOURS:
+        return mesh.vertex_colors.active_index
+    return mesh.color_attributes.active_color_index
+
+
+def _set_active_colour(mesh, name):
+    index = _colour_layers(mesh).find(name)
+    if LEGACY_COLOURS:
+        mesh.vertex_colors.active_index = index
+    else:
+        mesh.color_attributes.active_color_index = index
+
 # --- import as a package, the way Blender installs it ----------------------
 spec = importlib.util.spec_from_file_location(MODULE_NAME, SRC,
                                               submodule_search_locations=[])
@@ -189,7 +217,7 @@ def face_stretch_never_touches_materials():
 
     during = [m.name for m in cube.data.materials]
     assert during == before, f"materials changed while on: {during} != {before}"
-    assert et._VCOL_STRETCH in cube.data.color_attributes, \
+    assert et._VCOL_STRETCH in _colour_layers(cube.data), \
         "colour attribute was not created"
     assert not any(m.name.startswith("ET_FaceStretch")
                    for m in bpy.data.materials), "a temp material was created"
@@ -200,7 +228,7 @@ def face_stretch_never_touches_materials():
 
     after = [m.name for m in cube.data.materials]
     assert after == before, f"materials changed after off: {after} != {before}"
-    assert et._VCOL_STRETCH not in cube.data.color_attributes, \
+    assert et._VCOL_STRETCH not in _colour_layers(cube.data), \
         "colour attribute left behind"
     notes.append("face stretch leaves materials untouched end to end")
 
@@ -209,23 +237,23 @@ check("face stretch never touches materials", face_stretch_never_touches_materia
 
 def face_stretch_restores_active_colour_layer():
     mesh = cube.data
-    keep = mesh.color_attributes.new("MyColours", 'FLOAT_COLOR', 'CORNER')
-    mesh.color_attributes.active_color_index = mesh.color_attributes.find(keep.name)
-    before = mesh.color_attributes.active_color_index
+    keep = _new_colour_layer(mesh, "MyColours")
+    _set_active_colour(mesh, keep.name)
+    before = _active_colour_index(mesh)
 
     bpy.ops.object.select_all(action='DESELECT')
     cube.select_set(True)
     bpy.context.view_layer.objects.active = cube
     bpy.ops.et.face_stretch_analyzer()
-    assert (mesh.color_attributes.active_color_index
-            == mesh.color_attributes.find(et._VCOL_STRETCH)), \
+    assert (_active_colour_index(mesh)
+            == _colour_layers(mesh).find(et._VCOL_STRETCH)), \
         "stretch layer not made active"
 
     bpy.ops.et.face_stretch_analyzer()
-    assert mesh.color_attributes.active_color_index == before, \
+    assert _active_colour_index(mesh) == before, \
         "previous active colour attribute not restored"
-    assert "MyColours" in mesh.color_attributes, "user's colour attribute removed"
-    mesh.color_attributes.remove(mesh.color_attributes["MyColours"])
+    assert "MyColours" in _colour_layers(mesh), "user's colour attribute removed"
+    _colour_layers(mesh).remove(_colour_layers(mesh)["MyColours"])
 
 check("face stretch restores the active colour layer",
       face_stretch_restores_active_colour_layer)
@@ -242,7 +270,7 @@ def face_stretch_yields_to_silhouette():
     # otherwise the panel keeps reporting Face Stretch as active.
     et._clear_stretch_attributes()
     assert not et._stretch_state, "stretch state survived being displaced"
-    assert et._VCOL_STRETCH not in cube.data.color_attributes, \
+    assert et._VCOL_STRETCH not in _colour_layers(cube.data), \
         "colour attribute left behind after displacement"
 
 check("face stretch cleans up when displaced", face_stretch_yields_to_silhouette)
@@ -2054,10 +2082,14 @@ def paint_mask_falls_back_to_vertex_colour():
         raise AssertionError("painting an image mask without UVs was accepted")
 
     bpy.ops.et.paint_blend_mask('EXEC_DEFAULT', mask_type='VERTEX')
-    assert et._BLEND_PAINT_ATTR in mesh.color_attributes, \
+    assert et._BLEND_PAINT_ATTR in _colour_layers(mesh), \
         "vertex paint layer not created"
-    attr = mesh.color_attributes[et._BLEND_PAINT_ATTR]
-    assert abs(attr.data[0].color[0] - 0.5) < 1e-6, \
+    attr = _colour_layers(mesh)[et._BLEND_PAINT_ATTR]
+    # Neutral is linear 0.5. Float attributes store it as-is; legacy 3.0/3.1
+    # vertex colours store sRGB bytes the shader linearises, so 0.5 there must
+    # be written sRGB-encoded or the whole blend is dragged toward the base.
+    neutral = et._SRGB_HALF if LEGACY_COLOURS else 0.5
+    assert abs(attr.data[0].color[0] - neutral) < 0.01, \
         f"vertex layer not initialised to neutral grey: {attr.data[0].color[:]}"
 
     mask = obj.active_material.node_tree.nodes[et._MASK_NODE_NAME]
@@ -2075,7 +2107,7 @@ def paint_mask_falls_back_to_vertex_colour():
     back = mask.inputs['Paint'].links[0].from_node
     assert back.type == 'TEX_IMAGE', back.type
     assert back.image.name.endswith("_Mask"), back.image.name
-    assert et._BLEND_PAINT_ATTR in mesh.color_attributes, \
+    assert et._BLEND_PAINT_ATTR in _colour_layers(mesh), \
         "switching back deleted the vertex layer"
     _ensure_object_mode()
     notes.append("image and vertex mask layers coexist; switching only moves the link")
