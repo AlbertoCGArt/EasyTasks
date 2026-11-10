@@ -185,6 +185,32 @@ def _find_target_collection(obj, index=None, scene=None):
     return None
 
 
+def _filed_by_addon(obj):
+    """
+    Whether obj sits in a collection another add-on keeps for itself.
+
+    A generator (cables, scatter, fracture) files what it makes in a collection
+    of its own and finds it there again on the next rebuild. Routed out of it,
+    the generator no longer sees its output: it builds a fresh set and leaves
+    the routed one behind, so every rebuild multiplied the objects (Conduit's
+    Wall to Floor cables piled up in WALLS, Nov 2026). Such a collection carries
+    the add-on's bookkeeping as custom properties; a collection the user made,
+    or one Arrange Scene made, carries none.
+    """
+    return any(len(c.keys()) for c in obj.users_collection)
+
+
+def _where_new_objects_land(scene):
+    """The collections Blender adds a new object to: each view layer's active
+    collection, and the scene's own."""
+    homes = {scene.collection.as_pointer()}
+    for layer in scene.view_layers:
+        active = layer.active_layer_collection
+        if active is not None:
+            homes.add(active.collection.as_pointer())
+    return homes
+
+
 def _find_layer_collection(root_lc, coll):
     """Recursively find the LayerCollection wrapping a given Collection."""
     if root_lc.collection == coll:
@@ -286,15 +312,22 @@ def _auto_route_new_objects(scene, depsgraph):
         if s is None:
             return
         index = _build_route_index(s)
+        landing = _where_new_objects_land(s)
         for name in new_names:
             obj = s.objects.get(name)
             if obj is None:
                 continue
-            target = _find_target_collection(obj, index, s)
-            if target is None:
-                continue
             current_colls = list(obj.users_collection)
-            if len(current_colls) != 1 or current_colls[0] == target:
+            if len(current_colls) != 1:
+                continue
+            # Only what was added the way a user adds things: into the active
+            # collection or the scene's. An object an add-on put somewhere on
+            # purpose stays there (see _filed_by_addon).
+            if (current_colls[0].as_pointer() not in landing
+                    or _filed_by_addon(obj)):
+                continue
+            target = _find_target_collection(obj, index, s)
+            if target is None or current_colls[0] == target:
                 continue
             try:
                 _move_object(obj, target, s)
@@ -975,11 +1008,15 @@ class ET_OT_ArrangeScene(bpy.types.Operator):
 
         index = _build_route_index(scene)
 
-        routed, skipped = 0, 0
+        routed, skipped, kept = 0, 0, 0
         prefix_objects  = []
         # Snapshot first: moving objects while iterating scene.objects
         # reorders what the loop is walking.
         for obj in list(scene.objects):
+            if _filed_by_addon(obj):
+                # An add-on's own output: moving it makes the add-on lose it.
+                kept += 1
+                continue
             target = _find_target_collection(obj, index, scene)
             if target:
                 try:
@@ -1005,6 +1042,8 @@ class ET_OT_ArrangeScene(bpy.types.Operator):
                     skipped += 1
 
         message = f"Routed {routed} object(s), grouped {len(groups)} by name"
+        if kept:
+            message += f", left {kept} in add-on collections"
         if skipped:
             self.report({'WARNING'},
                         f"{message} — {skipped} could not be moved (linked data)")

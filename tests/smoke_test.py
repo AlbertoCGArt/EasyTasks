@@ -2640,6 +2640,64 @@ def uv_health_runs_in_edit_mode():
 check("uv health runs in Edit Mode", uv_health_runs_in_edit_mode)
 
 
+def routing_leaves_addon_output_alone():
+    """
+    Auto-route moved a generator's new objects out of the collection the
+    generator keeps them in: Conduit's 'Wall to Floor_0_cable_3' went to WALLS
+    on every rebuild, Conduit no longer found it, built six more, and the
+    cables multiplied (Nov 2026). Only what lands where Blender puts a new
+    object is routed, never what sits in a collection an add-on keeps (custom
+    properties), and Arrange Scene leaves those alone too.
+    """
+    _ensure_object_mode()
+    beams = bpy.data.collections.new("BEAMS")
+    scene.collection.children.link(beams)
+    output = bpy.data.collections.new("Beam Run_0")
+    output["es_output"] = True                       # an add-on's bookkeeping
+    scene.collection.children.link(output)
+    plain = bpy.data.collections.new("Kitbash")      # the user's, not active
+    scene.collection.children.link(plain)
+
+    def new(name, coll):
+        obj = bpy.data.objects.new(name, bpy.data.meshes.new(name + "M"))
+        coll.objects.link(obj)
+        return obj
+
+    queued = []
+    real_register = bpy.app.timers.register
+    bpy.app.timers.register = lambda fn, **kw: queued.append(fn)
+    try:
+        et._reset_route_snapshot(None)
+        et._auto_route_new_objects(scene, None)      # seeds the snapshot
+        cable = new("Beam Run_0_cable_3", output)
+        aside = new("Beam_Trim_02", plain)
+        panel = new("Beam_Panel_01", scene.collection)
+        et._auto_route_new_objects(scene, None)
+    finally:
+        bpy.app.timers.register = real_register
+    assert queued, "nothing was queued for the new objects"
+    for fn in queued:
+        fn()
+    assert list(cable.users_collection) == [output], \
+        f"the add-on's output lost its object: {[c.name for c in cable.users_collection]}"
+    assert list(aside.users_collection) == [plain], \
+        "an object put in a collection on purpose was routed"
+    assert list(panel.users_collection) == [beams], \
+        f"a newly added beam was not routed: {[c.name for c in panel.users_collection]}"
+
+    bpy.ops.object.select_all(action='DESELECT')
+    bpy.ops.et.arrange_scene()
+    assert list(cable.users_collection) == [output], \
+        "Arrange Scene moved an add-on's output"
+
+    for obj in (cable, aside, panel):
+        bpy.data.objects.remove(obj)
+    for coll in (beams, output, plain):
+        bpy.data.collections.remove(coll)
+
+check("routing leaves an add-on's output alone", routing_leaves_addon_output_alone)
+
+
 # --- unregister ------------------------------------------------------------
 check("unregister()", et.unregister)
 

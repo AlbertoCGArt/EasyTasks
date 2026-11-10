@@ -2,6 +2,18 @@
 
 All notable changes to Easy Tasks are recorded here.
 
+## [Unreleased]
+
+### Fixed
+- **Auto-route no longer takes objects away from other add-ons.** It routed
+  every new object by name, including the ones a generator had just filed in
+  its own collection: Conduit's Wall to Floor cables went to WALLS, Conduit no
+  longer found them, built a fresh set on the next move and left the old one
+  behind, so the cables multiplied. Auto-route now moves only what lands where
+  Blender adds a new object (the active collection or the scene's), and never
+  anything in a collection an add-on keeps for itself (one with custom
+  properties). Arrange Scene leaves those alone too and says how many it left.
+
 ## [2.6.0]
 
 Material tools join the scene tools: a Megascans importer, two-material
