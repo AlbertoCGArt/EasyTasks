@@ -317,6 +317,8 @@ def _auto_route_new_objects(scene, depsgraph):
             obj = s.objects.get(name)
             if obj is None:
                 continue
+            if _is_mirror_helper(obj):
+                continue    # Quick Mirror helpers stay beside the part they mirror
             current_colls = list(obj.users_collection)
             if len(current_colls) != 1:
                 continue
@@ -646,13 +648,24 @@ def _mirror_targets(context):
     active = context.active_object
     if active is None:
         return [], None
-    others = [o for o in context.selected_objects
-              if o != active and o.type in _MIRRORABLE]
+    selected = context.selected_objects
+    others = [o for o in selected
+              if o != active and o.type in _MIRRORABLE and _mirror_editable(o)]
     if others:
         return others, active
-    if active.type in _MIRRORABLE and active.select_get():
+    # Only when it is the one object selected: with an Empty or a light as the
+    # "part", falling back to the active one mirrored the body itself.
+    if (active.type in _MIRRORABLE and active.select_get()
+            and _mirror_editable(active)
+            and all(o == active for o in selected)):
         return [active], active
     return [], active
+
+
+def _mirror_editable(obj):
+    """Can this object take a modifier that is saved? A linked object takes
+    one in memory, drops its Mirror Object and loses it all on reload."""
+    return getattr(obj, 'is_editable', obj.library is None)
 
 
 def _is_mirror_helper(obj, pivot=None):
@@ -677,7 +690,13 @@ def _helper_fits(helper, pivot, active, scene):
     if not _is_mirror_helper(helper, pivot):
         return False
     if pivot == 'WORLD':
-        return helper.parent == active
+        if helper.parent == active:
+            return True
+        # Left unparented when the active one could not be parented to (a
+        # zero-scale axis): it is this body's while it sits on its origin.
+        return (helper.parent is None and active is not None
+                and (helper.matrix_world.translation
+                     - active.matrix_world.translation).length < 1e-4)
     return pivot == 'CURSOR'
 
 
@@ -685,7 +704,10 @@ def _same_place(a, b):
     """Two matrices at the same spot, turned the same way."""
     if (a.translation - b.translation).length > 1e-4:
         return False
-    return a.to_quaternion().rotation_difference(b.to_quaternion()).angle < 1e-4
+    # q and -q are the same rotation, and rotation_difference can report the
+    # pair as a full turn (2π) rather than 0; the dot product ignores the sign.
+    qa, qb = a.to_quaternion().normalized(), b.to_quaternion().normalized()
+    return abs(qa.dot(qb)) > 1.0 - 1e-6
 
 
 def _cursor_record(scene):
@@ -767,13 +789,19 @@ def _new_mirror_helper(pivot, active, target, scene):
     size = max(max(target.dimensions), 0.1) * 0.5
     helper.empty_display_size = size
     helper[_MIRROR_HELPER_PROP] = pivot
-    # Beside the part it mirrors, so it is found, hidden and moved with it.
-    colls = [c for c in target.users_collection if _editable(c)]
+    # Beside the part it mirrors, so it is found, hidden and moved with it,
+    # but only in a collection of this scene: a part can also sit in another
+    # scene's collection or RigidBodyWorld, where the helper would be unseen.
+    in_scene = {c.as_pointer() for c in _scene_collections(scene)}
+    in_scene.add(scene.collection.as_pointer())
+    colls = [c for c in target.users_collection if c.as_pointer() in in_scene]
     (colls[0] if colls else scene.collection).objects.link(helper)
     helper.matrix_world = _pivot_matrix(pivot, active, scene)
     if pivot == 'CURSOR':
         _place_on_cursor(helper, scene)
-    if pivot == 'WORLD':
+    # A body scaled to 0 on an axis has no inverse to parent through; the
+    # helper then stays put on world axes instead of following it.
+    if pivot == 'WORLD' and abs(active.matrix_world.determinant()) > 1e-12:
         world = helper.matrix_world.copy()
         helper.parent = active
         helper.matrix_parent_inverse = active.matrix_world.inverted()
@@ -918,7 +946,9 @@ def mirror_toggle(context, axis, pivot, side='WHOLE'):
         mod.use_axis[i] = turn_on
         mod.use_bisect_axis[i] = bisect
         mod.use_bisect_flip_axis[i] = flip
-        if not any(mod.use_axis):
+        # A Mirror inherited through a library override comes back on reload
+        # if removed, so it is left in place with every axis off.
+        if not any(mod.use_axis) and not getattr(mod, 'is_override_data', False):
             dropped.append(mod.mirror_object)
             target.modifiers.remove(mod)
         changed.append(target)

@@ -2944,6 +2944,60 @@ check("Quick Mirror: Whole, + to −, − to + set Bisect and Flip per axis",
       quick_mirror_sides)
 
 
+def quick_mirror_review_fixes():
+    import math
+    # An Empty as the "part" must not make the body mirror itself.
+    body = _qm_cube("QM_Body", (0, 0, 0))
+    bpy.ops.object.empty_add(location=(3, 0, 0))
+    empty = bpy.context.active_object
+    _qm_select(empty, body, active=body)
+    assert not bpy.ops.et.quick_mirror.poll(), "an Empty part left the buttons live"
+    assert not body.modifiers
+
+    # A body scaled to 0 on an axis: World Axes still works, no orphan helper.
+    part = _qm_cube("QM_Part", (3, 0, 0))
+    body.scale = (1, 1, 0)
+    bpy.context.view_layer.update()
+    _qm_select(part, body, active=body)
+    assert bpy.ops.et.quick_mirror(axis='X', pivot='WORLD') == {'FINISHED'}
+    assert len(_qm_mirrors(part)) == 1 and len(_qm_helpers()) == 1
+    bpy.ops.et.quick_mirror(axis='X', pivot='WORLD')
+    assert not _qm_helpers(), "helper left behind"
+    body.scale = (1, 1, 1)
+
+    # A cursor turned so its quaternion flips sign: an unmoved cursor must
+    # still read as unmoved, so the lit axis turns off.
+    scene.cursor.rotation_mode = 'XYZ'
+    scene.cursor.rotation_euler = (-math.pi / 2, math.pi / 4, 3 * math.pi / 4)
+    scene.cursor.location = (0, 5, 0)
+    bpy.ops.et.quick_mirror(axis='X', pivot='CURSOR')
+    bpy.ops.et.quick_mirror(axis='X', pivot='CURSOR')
+    assert not _qm_mirrors(part), "a turned cursor read as moved; X would not go off"
+    scene.cursor.rotation_euler = (0, 0, 0)
+    scene.cursor.location = (0, 0, 0)
+
+    # A part also linked into another scene's collection: the helper goes
+    # into a collection of this scene.
+    other = bpy.data.scenes.new("QM_Other")
+    elsewhere = bpy.data.collections.new("QM_Elsewhere")
+    other.collection.children.link(elsewhere)
+    for c in list(part.users_collection):
+        c.objects.unlink(part)
+    elsewhere.objects.link(part)
+    scene.collection.objects.link(part)
+    _qm_select(part, body, active=body)
+    bpy.ops.et.quick_mirror(axis='X', pivot='WORLD')
+    helper = _qm_mirrors(part)[0].mirror_object
+    assert helper.name in scene.objects, \
+        f"helper went to {[c.name for c in helper.users_collection]}, outside the scene"
+    _qm_cleanup(part, body, empty)
+    bpy.data.collections.remove(elsewhere)
+    bpy.data.scenes.remove(other)
+
+check("Quick Mirror: Empty part, zero-scale body, turned cursor, other scene",
+      quick_mirror_review_fixes)
+
+
 def quick_mirror_world_axes():
     import math
     body = _qm_cube("QM_Body", (1, 1, 0))
