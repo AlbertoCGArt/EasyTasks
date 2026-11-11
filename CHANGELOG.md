@@ -13,7 +13,11 @@ All notable changes to Easy Tasks are recorded here.
   multi-selection; the one beside them picks the pivot — the
   active object on its own axes, the active object on world axes, or the 3D
   cursor (the last two leave a small `_MirrorPivot` empty you can move to
-  adjust the mirror). Pressing a lit axis takes it off; the axis the part sits
+  adjust the mirror). After the 3D cursor moves, the next axis pressed brings
+  the part's cursor mirror to it instead of stacking a second one. A side
+  button chooses Whole, + to − (Bisect: keep the + half, mirror it onto −) or
+  − to + (Bisect + Flip), for a mesh that crosses the mirror plane.
+  Pressing a lit axis takes it off; the axis the part sits
   along is highlighted as the likely one. Several parts can be mirrored at
   once. Also in the Tools panel and in Q ▸ Quick Mirror, and the floating
   buttons can be turned off in the add-on preferences.

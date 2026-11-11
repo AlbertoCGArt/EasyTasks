@@ -2836,6 +2836,114 @@ check("Quick Mirror: 3D cursor pivot uses a helper and cleans it up",
       quick_mirror_cursor_helper)
 
 
+import mathutils
+
+
+def _qm_helpers():
+    return [o for o in bpy.data.objects if o.get(et._MIRROR_HELPER_PROP) is not None]
+
+
+def quick_mirror_cursor_follows_on_press():
+    body = _qm_cube("QM_Body", (0, 0, 0))
+    part = _qm_cube("QM_Part", (3, 0, 0))
+    scene.cursor.location = (0, 5, 0)
+    _qm_select(part, body, active=body)
+    bpy.ops.et.quick_mirror(axis='X', pivot='CURSOR')
+    # The cursor moves; the next press brings the mirror, it does not stack one.
+    scene.cursor.location = (0, 8, 0)
+    bpy.ops.et.quick_mirror(axis='Y', pivot='CURSOR')
+    mods = _qm_mirrors(part)
+    assert len(mods) == 1, f"a moved cursor stacked a second Mirror ({len(mods)})"
+    assert tuple(mods[0].use_axis) == (True, True, False), tuple(mods[0].use_axis)
+    helper = mods[0].mirror_object
+    assert (helper.matrix_world.translation - scene.cursor.location).length < 1e-5, \
+        "the mirror did not come to the cursor"
+    assert len(_qm_helpers()) == 1, f"{len(_qm_helpers())} helpers for one mirror"
+    # Pressing a lit axis after the cursor moved keeps it on.
+    scene.cursor.location = (0, 9, 0)
+    bpy.ops.et.quick_mirror(axis='X', pivot='CURSOR')
+    assert _qm_mirrors(part) and _qm_mirrors(part)[0].use_axis[0], \
+        "bringing the mirror turned a lit axis off"
+    # A helper moved by hand stays where it was put: the cursor did not move.
+    helper.location = (0, 6, 1)
+    bpy.context.view_layer.update()
+    bpy.ops.et.quick_mirror(axis='Z', pivot='CURSOR')
+    assert (helper.matrix_world.translation
+            - mathutils.Vector((0, 6, 1))).length < 1e-5, \
+        "a hand-placed helper snapped back to the cursor"
+    assert tuple(_qm_mirrors(part)[0].use_axis) == (True, True, True)
+    scene.cursor.location = (0, 0, 0)
+    _qm_cleanup(part, body)
+
+check("Quick Mirror: a moved cursor brings the mirror on the next press",
+      quick_mirror_cursor_follows_on_press)
+
+
+def quick_mirror_cursor_shared_helper():
+    body = _qm_cube("QM_Body", (0, 0, 0))
+    a = _qm_cube("QM_A", (3, 0, 0))
+    b = _qm_cube("QM_B", (3, 2, 0))
+    scene.cursor.location = (0, 5, 0)
+    _qm_select(a, b, body, active=body)
+    bpy.ops.et.quick_mirror(axis='X', pivot='CURSOR')
+    shared = _qm_mirrors(a)[0].mirror_object
+    assert _qm_mirrors(b)[0].mirror_object == shared
+    # Only A is brought to the new cursor; B keeps its mirror where it was.
+    scene.cursor.location = (0, -5, 0)
+    _qm_select(a, body, active=body)
+    bpy.ops.et.quick_mirror(axis='X', pivot='CURSOR')
+    ha, hb = _qm_mirrors(a)[0].mirror_object, _qm_mirrors(b)[0].mirror_object
+    assert hb == shared and (hb.matrix_world.translation
+                             - mathutils.Vector((0, 5, 0))).length < 1e-5, \
+        "a part left out of the selection had its mirror moved"
+    assert ha != shared and (ha.matrix_world.translation
+                             - scene.cursor.location).length < 1e-5, \
+        "the selected part's mirror did not come to the cursor"
+    scene.cursor.location = (0, 0, 0)
+    _qm_cleanup(a, b, body)
+
+check("Quick Mirror: a shared cursor helper is not moved under another part",
+      quick_mirror_cursor_shared_helper)
+
+
+def quick_mirror_sides():
+    body = _qm_cube("QM_Body", (0, 0, 0))
+    bpy.ops.mesh.primitive_cube_add(size=2, location=(0, 0, 0))
+    part = bpy.context.active_object
+    part.name = "QM_Straddle"
+    for v in part.data.vertices:          # spans x -0.5..1.5 across the body
+        v.co.x += 0.5
+
+    def x_range():
+        dg = bpy.context.evaluated_depsgraph_get()
+        ev = part.evaluated_get(dg)
+        xs = [(ev.matrix_world @ v.co).x for v in ev.data.vertices]
+        return round(min(xs), 3), round(max(xs), 3)
+
+    _qm_select(part, body, active=body)
+    bpy.ops.et.quick_mirror(axis='X', pivot='ACTIVE', side='NEGATIVE')
+    mod = _qm_mirrors(part)[0]
+    assert (mod.use_bisect_axis[0], mod.use_bisect_flip_axis[0]) == (True, False)
+    assert x_range() == (-1.5, 1.5), f"+ to − kept the wrong half: {x_range()}"
+    # Pressing the lit axis with the other side switches it, it stays on.
+    bpy.ops.et.quick_mirror(axis='X', pivot='ACTIVE', side='POSITIVE')
+    mod = _qm_mirrors(part)[0]
+    assert mod.use_axis[0], "switching side turned the axis off"
+    assert (mod.use_bisect_axis[0], mod.use_bisect_flip_axis[0]) == (True, True)
+    assert x_range() == (-0.5, 0.5), f"− to + kept the wrong half: {x_range()}"
+    # Back to Whole: no cut left behind.
+    bpy.ops.et.quick_mirror(axis='X', pivot='ACTIVE', side='WHOLE')
+    mod = _qm_mirrors(part)[0]
+    assert (mod.use_bisect_axis[0], mod.use_bisect_flip_axis[0]) == (False, False)
+    # Pressed again as it is, it goes off.
+    bpy.ops.et.quick_mirror(axis='X', pivot='ACTIVE', side='WHOLE')
+    assert not _qm_mirrors(part), "the same press twice did not take it off"
+    _qm_cleanup(part, body)
+
+check("Quick Mirror: Whole, + to −, − to + set Bisect and Flip per axis",
+      quick_mirror_sides)
+
+
 def quick_mirror_world_axes():
     import math
     body = _qm_cube("QM_Body", (1, 1, 0))
@@ -2883,6 +2991,7 @@ def quick_mirror_ui_bits():
                 .parameters['icon'].enum_items.keys())
     icons = {f'EVENT_{a}' for a in et._MIRROR_AXES}
     icons |= {icon for _k, _l, _d, icon in et._MIRROR_PIVOTS}
+    icons |= {icon for _k, _l, _d, icon in et._MIRROR_SIDES}
     missing = sorted(icons - valid)
     assert not missing, f"unknown icons: {missing}"
     # Registering a class gives it its own bl_rna; GizmoGroup has no
