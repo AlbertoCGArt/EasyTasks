@@ -2789,6 +2789,24 @@ def quick_mirror_several_parts():
 check("Quick Mirror: every selected part is mirrored", quick_mirror_several_parts)
 
 
+def quick_mirror_buttons_only_for_a_pair():
+    body = _qm_cube("QM_Body", (0, 0, 0))
+    a = _qm_cube("QM_A", (3, 0, 0))
+    b = _qm_cube("QM_B", (3, 2, 0))
+    _qm_select(a, body, active=body)
+    assert et._quick_mirror_selection_fits(bpy.context), "no buttons for part + body"
+    _qm_select(a, b, body, active=body)
+    assert not et._quick_mirror_selection_fits(bpy.context), \
+        "buttons shown for a selection of three"
+    _qm_select(body, active=body)
+    assert not et._quick_mirror_selection_fits(bpy.context), \
+        "buttons shown for a single object"
+    _qm_cleanup(a, b, body)
+
+check("Quick Mirror: floating buttons only for exactly two selected",
+      quick_mirror_buttons_only_for_a_pair)
+
+
 def quick_mirror_cursor_helper():
     body = _qm_cube("QM_Body", (0, 0, 0))
     part = _qm_cube("QM_Part", (3, 0, 0))

@@ -943,8 +943,25 @@ def _quick_mirror_row_origin(context, count, scale):
     return x, y, step
 
 
+def _quick_mirror_selection_fits(context):
+    """Exactly two objects selected, the active one among them, and the other
+    one mirrorable: the part + body case the floating buttons are for.
+
+    Not "two or more": every multi-selection made for something else (moving,
+    joining, parenting a group) put the buttons on screen too. Mirroring
+    several parts at once is still in the Tools panel and Q menu.
+    """
+    obj = context.active_object
+    if obj is None or not obj.select_get():
+        return False
+    if len(context.selected_objects) != 2:
+        return False
+    targets, _active = _mirror_targets(context)
+    return bool(targets) and targets != [obj]
+
+
 class ET_GGT_QuickMirror(bpy.types.GizmoGroup):
-    """Pivot + X / Y / Z under the active object while two or more objects
+    """Pivot + X / Y / Z under the active object while exactly two objects
     are selected. The pivot button cycles Active / World Axes / 3D Cursor."""
     bl_idname      = "ET_GGT_quick_mirror"
     bl_label       = "Easy Tasks Quick Mirror"
@@ -959,13 +976,7 @@ class ET_GGT_QuickMirror(bpy.types.GizmoGroup):
         space = context.space_data
         if space is None or not getattr(space, 'show_gizmo', True):
             return False
-        obj = context.active_object
-        if obj is None or not obj.select_get():
-            return False
-        if len(context.selected_objects) < 2 or _transforming(context):
-            return False
-        targets, _active = _mirror_targets(context)
-        return bool(targets) and targets != [obj]
+        return _quick_mirror_selection_fits(context) and not _transforming(context)
 
     def _button(self, icon):
         gz = self.gizmos.new('GIZMO_GT_button_2d')
@@ -5800,7 +5811,7 @@ class ET_AddonPreferences(bpy.types.AddonPreferences):
         name="Quick Mirror Buttons in the Viewport",
         default=True,
         description="Show the pivot and X / Y / Z mirror buttons under the "
-                    "active object while two or more objects are selected")
+                    "active object while exactly two objects are selected")
 
     def draw(self, context):
         layout = self.layout
