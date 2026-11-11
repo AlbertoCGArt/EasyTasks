@@ -571,6 +571,467 @@ class ET_OT_AddModifier(bpy.types.Operator):
 
 
 # ---------------------------------------------------------------------------
+# Quick Mirror
+# ---------------------------------------------------------------------------
+#
+# Select the part, then the object to mirror it across (that one is active),
+# and press X, Y or Z: the part gets a Mirror modifier whose Mirror Object is
+# the pivot. Nothing is applied and no origin moves, so the copy follows when
+# either object is moved, and pressing the same axis again takes it off.
+#
+# The pivot is one of three:
+#   ACTIVE  the active object itself: its origin and its own axes.
+#   WORLD   a helper empty at the active object's origin, on world axes, and
+#           parented to it so it follows. For a rotated body whose own axes
+#           are not the ones to mirror on.
+#   CURSOR  a helper empty at the 3D cursor, turned with it.
+# A Mirror modifier mirrors around an object, never a bare point, so the two
+# helper pivots are real empties. They stay in the scene, small and named
+# '<part>_MirrorPivot', so moving one moves the mirror; one that no Mirror
+# uses any more is removed.
+
+_MIRROR_AXES   = ('X', 'Y', 'Z')
+_MIRROR_PIVOTS = (
+    ('ACTIVE', 'Active',        "Mirror across the active object's origin, on its own axes",
+     'OBJECT_DATA'),
+    ('WORLD',  'World Axes',    "Mirror across the active object's origin, on world axes "
+                                "(a helper empty that follows the active object)",
+     'ORIENTATION_GLOBAL'),
+    ('CURSOR', '3D Cursor',     "Mirror across the 3D cursor (a helper empty left at the "
+                                "cursor, which can be moved afterwards)",
+     'PIVOT_CURSOR'),
+)
+_MIRROR_PIVOT_ICON = {key: icon for key, _l, _d, icon in _MIRROR_PIVOTS}
+# Custom property on a helper empty: which pivot it stands for.
+_MIRROR_HELPER_PROP = "et_mirror_pivot"
+# Modifiers that belong after a mirror: they read the finished shape.
+_MIRROR_FINISHERS = {'WEIGHTED_NORMAL', 'TRIANGULATE'}
+# Object types a Mirror modifier can go on.
+_MIRRORABLE = {'MESH', 'CURVE', 'SURFACE', 'FONT'}
+
+
+def _mirror_targets(context):
+    """(targets, active): what gets the modifier, and the pivot object.
+
+    With two or more selected, every selected object but the active one is a
+    target. With only the active one selected it is its own target, which
+    only makes sense around the 3D cursor.
+    """
+    active = context.active_object
+    if active is None:
+        return [], None
+    others = [o for o in context.selected_objects
+              if o != active and o.type in _MIRRORABLE]
+    if others:
+        return others, active
+    if active.type in _MIRRORABLE and active.select_get():
+        return [active], active
+    return [], active
+
+
+def _is_mirror_helper(obj, pivot=None):
+    if obj is None or obj.type != 'EMPTY':
+        return False
+    kind = obj.get(_MIRROR_HELPER_PROP)
+    return kind is not None and (pivot is None or kind == pivot)
+
+
+def _cursor_matrix(scene):
+    # cursor.matrix already follows whichever rotation mode the cursor uses.
+    return mathutils.Matrix(scene.cursor.matrix).normalized()
+
+
+def _helper_fits(helper, pivot, active, scene):
+    """Is `helper` still the pivot this click asks for?"""
+    if not _is_mirror_helper(helper, pivot):
+        return False
+    if pivot == 'WORLD':
+        return helper.parent == active
+    if pivot == 'CURSOR':
+        here = helper.matrix_world.translation
+        return (here - scene.cursor.location).length < 1e-4
+    return False
+
+
+def _mirror_modifier_for(target, pivot, active, scene):
+    """The Mirror on `target` that already mirrors across this pivot, or None."""
+    for mod in target.modifiers:
+        if mod.type != 'MIRROR':
+            continue
+        if pivot == 'ACTIVE':
+            if mod.mirror_object == active and active != target:
+                return mod
+        elif _helper_fits(mod.mirror_object, pivot, active, scene):
+            return mod
+    return None
+
+
+def _pivot_matrix(pivot, active, scene):
+    """World matrix of the pivot, rotation and location only."""
+    if pivot == 'CURSOR':
+        return _cursor_matrix(scene)
+    loc = active.matrix_world.translation
+    if pivot == 'WORLD':
+        return mathutils.Matrix.Translation(loc)
+    rot = active.matrix_world.to_quaternion().to_matrix().to_4x4()
+    return mathutils.Matrix.Translation(loc) @ rot
+
+
+def _suggested_mirror_axis(target, pivot, active, scene):
+    """The axis the target sits furthest along, seen from the pivot: the one
+    whose mirror lands on the far side rather than overlapping the part."""
+    if target is None or active is None:
+        return None
+    corners = [target.matrix_world @ mathutils.Vector(c) for c in target.bound_box]
+    centre = sum(corners, mathutils.Vector()) / len(corners)
+    local = _pivot_matrix(pivot, active, scene).inverted() @ centre
+    offs = [abs(v) for v in local]
+    if max(offs) < 1e-6:
+        return None
+    return _MIRROR_AXES[offs.index(max(offs))]
+
+
+def _new_mirror_helper(pivot, active, target, scene):
+    name = f"{target.name}_MirrorPivot"
+    helper = bpy.data.objects.new(name, None)
+    helper.empty_display_type = 'PLAIN_AXES'
+    size = max(max(target.dimensions), 0.1) * 0.5
+    helper.empty_display_size = size
+    helper[_MIRROR_HELPER_PROP] = pivot
+    # Beside the part it mirrors, so it is found, hidden and moved with it.
+    colls = [c for c in target.users_collection if _editable(c)]
+    (colls[0] if colls else scene.collection).objects.link(helper)
+    helper.matrix_world = _pivot_matrix(pivot, active, scene)
+    if pivot == 'WORLD':
+        world = helper.matrix_world.copy()
+        helper.parent = active
+        helper.matrix_parent_inverse = active.matrix_world.inverted()
+        helper.matrix_world = world
+    return helper
+
+
+def _move_modifier(obj, mod, index):
+    """Move `mod` to `index` in obj's stack, on every supported Blender."""
+    current = list(obj.modifiers).index(mod)
+    if current == index:
+        return
+    if hasattr(obj.modifiers, 'move'):
+        obj.modifiers.move(current, index)
+        return
+    override = {'object': obj, 'active_object': obj}
+    if hasattr(bpy.context, 'temp_override'):
+        with bpy.context.temp_override(**override):
+            bpy.ops.object.modifier_move_to_index(modifier=mod.name, index=index)
+    else:
+        bpy.ops.object.modifier_move_to_index(override, modifier=mod.name, index=index)
+
+
+def _place_mirror(obj, mod):
+    """Last in the stack, but before Weighted Normal / Triangulate, which
+    should see the mirrored shape."""
+    mods = list(obj.modifiers)
+    index = len(mods) - 1
+    while index > 0 and mods[index - 1].type in _MIRROR_FINISHERS:
+        index -= 1
+    _move_modifier(obj, mod, index)
+
+
+def _drop_unused_helpers(candidates):
+    """Remove helper empties no Mirror modifier points at any more."""
+    used = {mod.mirror_object for obj in bpy.data.objects
+            for mod in obj.modifiers if mod.type == 'MIRROR'}
+    for helper in candidates:
+        if helper is not None and _is_mirror_helper(helper) and helper not in used:
+            bpy.data.objects.remove(helper)
+
+
+def _mirror_axes_on(context, pivot):
+    """{'X': bool, ...} for the first target's Mirror across this pivot."""
+    targets, active = _mirror_targets(context)
+    if not targets:
+        return {}
+    mod = _mirror_modifier_for(targets[0], pivot, active, context.scene)
+    if mod is None:
+        return {}
+    return {a: bool(mod.use_axis[i]) for i, a in enumerate(_MIRROR_AXES)}
+
+
+def mirror_toggle(context, axis, pivot):
+    """Turn `axis` on or off on every target's Mirror across `pivot`.
+
+    Returns (turned_on: bool | None, changed targets). On is decided once,
+    from the first target, so a mixed selection all ends up the same way.
+    """
+    scene = context.scene
+    targets, active = _mirror_targets(context)
+    if pivot == 'ACTIVE':
+        targets = [t for t in targets if t != active]
+    if not targets:
+        return None, []
+    i = _MIRROR_AXES.index(axis)
+    first = _mirror_modifier_for(targets[0], pivot, active, scene)
+    turn_on = first is None or not first.use_axis[i]
+
+    shared_helper = None
+    dropped = []
+    changed = []
+    for target in targets:
+        mod = _mirror_modifier_for(target, pivot, active, scene)
+        if mod is None:
+            if not turn_on:
+                continue
+            if pivot == 'ACTIVE':
+                mirror_obj = active
+            else:
+                if shared_helper is None:
+                    shared_helper = _new_mirror_helper(pivot, active, target, scene)
+                mirror_obj = shared_helper
+            try:
+                mod = target.modifiers.new(name="Mirror", type='MIRROR')
+            except (TypeError, RuntimeError):
+                mod = None
+            if mod is None:
+                continue
+            mod.use_axis = (False, False, False)
+            mod.mirror_object = mirror_obj
+            # Separate parts: nothing on the mirror plane should weld or clip.
+            mod.use_mirror_merge = False
+            mod.use_clip = False
+            _place_mirror(target, mod)
+        mod.use_axis[i] = turn_on
+        if not any(mod.use_axis):
+            dropped.append(mod.mirror_object)
+            target.modifiers.remove(mod)
+        changed.append(target)
+    if dropped:
+        _drop_unused_helpers(set(dropped))
+    return turn_on, changed
+
+
+class ET_OT_QuickMirror(bpy.types.Operator):
+    bl_idname  = "et.quick_mirror"
+    bl_label   = "Quick Mirror"
+    bl_description = ("Mirror the selected objects across the active one (or the "
+                      "3D cursor) with a Mirror modifier. Press the same axis "
+                      "again to take it off")
+    bl_options = {"REGISTER", "UNDO"}
+
+    axis: bpy.props.EnumProperty(
+        name="Axis",
+        items=[(a, a, f"Mirror on {a}") for a in _MIRROR_AXES],
+        default='X')
+    pivot: bpy.props.EnumProperty(
+        name="Pivot",
+        items=[(k, l, d, ic, n) for n, (k, l, d, ic) in enumerate(_MIRROR_PIVOTS)],
+        default='ACTIVE')
+
+    @classmethod
+    def poll(cls, context):
+        if context.mode != 'OBJECT':
+            return False
+        targets, _active = _mirror_targets(context)
+        return bool(targets)
+
+    def execute(self, context):
+        targets, active = _mirror_targets(context)
+        if self.pivot == 'ACTIVE' and targets == [active]:
+            self.report({'WARNING'},
+                        "Select the part first, then the object to mirror it across")
+            return {'CANCELLED'}
+        turned_on, changed = mirror_toggle(context, self.axis, self.pivot)
+        if not changed:
+            self.report({'WARNING'}, "Nothing to mirror")
+            return {'CANCELLED'}
+        what = (f"'{changed[0].name}'" if len(changed) == 1
+                else f"{len(changed)} objects")
+        if turned_on:
+            around = {'ACTIVE': f"'{active.name}'",
+                      'WORLD':  f"'{active.name}' on world axes",
+                      'CURSOR': "the 3D cursor"}[self.pivot]
+            self.report({'INFO'}, f"Mirrored {what} on {self.axis} across {around}")
+        else:
+            self.report({'INFO'}, f"Took {self.axis} off the mirror of {what}")
+        return {"FINISHED"}
+
+
+def draw_quick_mirror(layout, context):
+    """Pivot choice and the three axis buttons, lit where an axis is on."""
+    scene = context.scene
+    pivot = scene.et_mirror_pivot
+    row = layout.row(align=True)
+    row.prop(scene, 'et_mirror_pivot', expand=True)
+    on = _mirror_axes_on(context, pivot) if context.mode == 'OBJECT' else {}
+    row = layout.row(align=True)
+    row.scale_y = 1.2
+    for axis in _MIRROR_AXES:
+        op = row.operator('et.quick_mirror', text=axis, depress=on.get(axis, False))
+        op.axis = axis
+        op.pivot = pivot
+
+
+class ET_MT_QuickMirrorMenu(bpy.types.Menu):
+    bl_idname = "ET_MT_quick_mirror_menu"
+    bl_label  = "Quick Mirror"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text='Part first, then the object to mirror across',
+                     icon='INFO')
+        layout.separator()
+        draw_quick_mirror(layout, context)
+
+
+# --- floating buttons in the 3D view ---------------------------------------
+
+_QM_BACK   = (0.18, 0.18, 0.2)
+_QM_HINT   = (0.34, 0.34, 0.38)
+_QM_LIT    = (0.85, 0.5, 0.12)
+_QM_AMBER  = (1.0, 0.62, 0.15)
+_QM_SIZE   = 15.0       # button radius in pixels, before UI scale
+_QM_GAP    = 6.0
+_QM_BELOW  = 70.0       # how far under the active object's origin the row sits
+
+
+def _quick_mirror_buttons_on():
+    prefs = _prefs()
+    return prefs is None or getattr(prefs, 'quick_mirror_buttons', True)
+
+
+def _transforming(context):
+    """A move, rotate or scale running in this window."""
+    win = getattr(context, 'window', None)
+    for op in (getattr(win, 'modal_operators', None) or ()):
+        if getattr(op, 'bl_idname', '').startswith('TRANSFORM_OT'):
+            return True
+    return False
+
+
+def _quick_mirror_row_origin(context, count, scale):
+    """Left button centre of a row of `count` buttons under the active object,
+    kept inside the view and clear of the sidebar, toolbar and headers."""
+    from bpy_extras import view3d_utils
+    region, rv3d = context.region, context.region_data
+    obj = context.active_object
+    p = view3d_utils.location_3d_to_region_2d(region, rv3d,
+                                              obj.matrix_world.translation)
+    if p is None:
+        return None
+    r = _QM_SIZE * scale
+    step = 2 * r + _QM_GAP * scale
+    width = step * (count - 1)
+    x0, y0, x1, y1 = r + 4, r + 4, region.width - r - 4, region.height - r - 4
+    area = context.area
+    if area is not None:
+        for reg in area.regions:
+            if reg.width <= 1 or reg.height <= 1:
+                continue
+            left = reg.x - region.x
+            bottom = reg.y - region.y
+            if reg.type == 'UI' and left > region.width / 2:
+                x1 = min(x1, left - r - 4)
+            elif reg.type == 'TOOLS' and left < region.width / 2:
+                x0 = max(x0, left + reg.width + r + 4)
+            elif reg.type in {'HEADER', 'TOOL_HEADER'}:
+                if bottom > region.height / 2:
+                    y1 = min(y1, bottom - r - 4)
+                else:
+                    y0 = max(y0, bottom + reg.height + r + 4)
+    x = p.x - width / 2
+    y = p.y - _QM_BELOW * scale
+    x = min(max(x, x0), max(x0, x1 - width))
+    y = min(max(y, y0), max(y0, y1))
+    return x, y, step
+
+
+class ET_GGT_QuickMirror(bpy.types.GizmoGroup):
+    """Pivot + X / Y / Z under the active object while two or more objects
+    are selected. The pivot button cycles Active / World Axes / 3D Cursor."""
+    bl_idname      = "ET_GGT_quick_mirror"
+    bl_label       = "Easy Tasks Quick Mirror"
+    bl_space_type  = 'VIEW_3D'
+    bl_region_type = 'WINDOW'
+    bl_options     = {'PERSISTENT', 'SCALE'}
+
+    @classmethod
+    def poll(cls, context):
+        if not _quick_mirror_buttons_on() or context.mode != 'OBJECT':
+            return False
+        space = context.space_data
+        if space is None or not getattr(space, 'show_gizmo', True):
+            return False
+        obj = context.active_object
+        if obj is None or not obj.select_get():
+            return False
+        if len(context.selected_objects) < 2 or _transforming(context):
+            return False
+        targets, _active = _mirror_targets(context)
+        return bool(targets) and targets != [obj]
+
+    def _button(self, icon):
+        gz = self.gizmos.new('GIZMO_GT_button_2d')
+        gz.icon = icon
+        gz.draw_options = {'BACKDROP', 'OUTLINE'}
+        gz.color = _QM_BACK
+        gz.color_highlight = _QM_AMBER
+        gz.alpha = gz.alpha_highlight = 0.9
+        gz.scale_basis = _QM_SIZE
+        return gz
+
+    def setup(self, context):
+        # One pivot button per pivot, only the current one shown: a
+        # button_2d reads its icon once and does not redraw a changed one.
+        self.pivots = {}
+        for key, _l, _d, icon in _MIRROR_PIVOTS:
+            gz = self._button(icon)
+            props = gz.target_set_operator('wm.context_cycle_enum')
+            props.data_path = 'scene.et_mirror_pivot'
+            props.wrap = True
+            self.pivots[key] = gz
+        self.axes = {}
+        for axis in _MIRROR_AXES:
+            gz = self._button(f'EVENT_{axis}')
+            self.axes[axis] = gz
+        self._pivot = None
+
+    def draw_prepare(self, context):
+        if not hasattr(self, 'axes'):
+            return
+        scene = context.scene
+        pivot = scene.et_mirror_pivot
+        if pivot != self._pivot:
+            for axis, gz in self.axes.items():
+                props = gz.target_set_operator('et.quick_mirror')
+                props.axis = axis
+                props.pivot = pivot
+            self._pivot = pivot
+
+        scale = context.preferences.system.ui_scale
+        spot = _quick_mirror_row_origin(context, 1 + len(self.axes), scale)
+        every = list(self.pivots.values()) + list(self.axes.values())
+        if spot is None:
+            for gz in every:
+                gz.hide = True
+            return
+        x, y, step = spot
+
+        for key, gz in self.pivots.items():
+            gz.hide = key != pivot
+            gz.matrix_basis = mathutils.Matrix.Translation((x, y, 0.0))
+
+        targets, active = _mirror_targets(context)
+        on = _mirror_axes_on(context, pivot)
+        hint = (None if any(on.values()) else
+                _suggested_mirror_axis(targets[0] if targets else None,
+                                       pivot, active, scene))
+        for n, axis in enumerate(_MIRROR_AXES, start=1):
+            gz = self.axes[axis]
+            gz.hide = False
+            gz.color = (_QM_LIT if on.get(axis) else
+                        _QM_HINT if axis == hint else _QM_BACK)
+            gz.matrix_basis = mathutils.Matrix.Translation((x + n * step, y, 0.0))
+
+
+# ---------------------------------------------------------------------------
 # Batch export
 # ---------------------------------------------------------------------------
 
@@ -741,6 +1202,7 @@ class ET_MT_ModifiersMenu(bpy.types.Menu):
         MODS = [
             ('ARRAY',           'Array',               'MOD_ARRAY'),
             ('BEVEL',           'Bevel',               'MOD_BEVEL'),
+            ('MIRROR',          'Mirror',              'MOD_MIRROR'),
             ('EDGE_SPLIT',      'Edge Split',          'MOD_EDGESPLIT'),
             ('SOLIDIFY',        'Solidify',            'MOD_SOLIDIFY'),
             ('WEIGHTED_NORMAL', 'Weighted Normal',     'MOD_NORMALEDIT'),
@@ -806,6 +1268,7 @@ class ET_MT_FavToolsMenu(bpy.types.Menu):
         layout.label(text='FavTools', icon='SOLO_ON')
         layout.separator()
         layout.menu('ET_MT_modifiers_menu', text='Modifiers', icon='MODIFIER')
+        layout.menu('ET_MT_quick_mirror_menu', text='Quick Mirror', icon='MOD_MIRROR')
         layout.separator()
         layout.operator('et.batch_export', text='Batch Export', icon='EXPORT')
         layout.separator()
@@ -5333,12 +5796,19 @@ class ET_AddonPreferences(bpy.types.AddonPreferences):
         description="Silently move newly created objects into a matching "
                     "collection as soon as they are added")
 
+    quick_mirror_buttons: bpy.props.BoolProperty(
+        name="Quick Mirror Buttons in the Viewport",
+        default=True,
+        description="Show the pivot and X / Y / Z mirror buttons under the "
+                    "active object while two or more objects are selected")
+
     def draw(self, context):
         layout = self.layout
 
         box = layout.box()
         box.label(text='Behaviour', icon='PREFERENCES')
         box.prop(self, 'auto_route')
+        box.prop(self, 'quick_mirror_buttons')
 
         shortcuts = (
             ('easy_tasks_pie',      'EasyTasks Pie (Ctrl+Shift+X)', 'KEYINGSET'),
@@ -5425,6 +5895,10 @@ class ET_PT_ToolsPanel(bpy.types.Panel):
         col.operator('et.wnormals_bevel',  text='WNormals + Bevel', icon='MOD_NORMALEDIT')
         col.operator('et.correct_normals', text='Correct Normals',  icon='NORMALS_VERTEX_FACE')
         col.operator('et.clean_up_mesh',   text='Clean Up Mesh',    icon='BRUSH_DATA')
+
+        box = layout.box()
+        box.label(text="Quick Mirror", icon='MOD_MIRROR')
+        draw_quick_mirror(box.column(align=True), context)
 
         box = layout.box()
         box.label(text="Materials", icon='MATERIAL')
@@ -5838,6 +6312,9 @@ classes = (
     ET_OT_ApplyModifiers,
     ET_OT_ClearModifiers,
     ET_OT_AddModifier,
+    ET_OT_QuickMirror,
+    ET_MT_QuickMirrorMenu,
+    ET_GGT_QuickMirror,
     ET_OT_BatchExport,
     ET_MT_InteractionModePie,
     ET_MT_ModifiersMenu,
@@ -5926,6 +6403,11 @@ def register():
 
     bpy.types.Scene.et_semantic = bpy.props.PointerProperty(type=ET_SemanticSettings)
     bpy.types.Scene.et_quick_slots = bpy.props.CollectionProperty(type=ET_QuickSlot)
+    bpy.types.Scene.et_mirror_pivot = bpy.props.EnumProperty(
+        name="Mirror Pivot",
+        description="What Quick Mirror mirrors across",
+        items=[(k, l, d, ic, n) for n, (k, l, d, ic) in enumerate(_MIRROR_PIVOTS)],
+        default='ACTIVE')
 
     bpy.types.VIEW3D_MT_editor_menus.append(draw_header_add_menu)
     bpy.types.DATA_PT_modifiers.append(draw_modifier_panel_buttons)
@@ -5986,6 +6468,7 @@ def unregister():
     _isolation_state.clear()
     _vis_bookmarks.clear()
 
+    del bpy.types.Scene.et_mirror_pivot
     del bpy.types.Scene.et_quick_slots
     del bpy.types.Scene.et_semantic
 

@@ -2698,6 +2698,183 @@ def routing_leaves_addon_output_alone():
 check("routing leaves an add-on's output alone", routing_leaves_addon_output_alone)
 
 
+# --- Quick Mirror ------------------------------------------------------------
+
+def _qm_cube(name, loc):
+    bpy.ops.mesh.primitive_cube_add(size=1, location=loc)
+    obj = bpy.context.active_object
+    obj.name = name
+    return obj
+
+
+def _qm_select(*objs, active):
+    bpy.ops.object.select_all(action='DESELECT')
+    for o in objs:
+        o.select_set(True)
+    bpy.context.view_layer.objects.active = active
+
+
+def _qm_mirrors(obj):
+    return [m for m in obj.modifiers if m.type == 'MIRROR']
+
+
+def _qm_verts(obj):
+    dg = bpy.context.evaluated_depsgraph_get()
+    return len(obj.evaluated_get(dg).data.vertices)
+
+
+def _qm_cleanup(*objs):
+    for o in objs:
+        if o.name in bpy.data.objects:
+            bpy.data.objects.remove(o)
+    for o in list(bpy.data.objects):
+        if o.get(et._MIRROR_HELPER_PROP) is not None:
+            bpy.data.objects.remove(o)
+
+
+def quick_mirror_across_active():
+    body = _qm_cube("QM_Body", (0, 0, 0))
+    part = _qm_cube("QM_Part", (3, 0, 0))
+    _qm_select(part, body, active=body)
+    assert bpy.ops.et.quick_mirror(axis='X', pivot='ACTIVE') == {'FINISHED'}
+    mods = _qm_mirrors(part)
+    assert len(mods) == 1, f"expected one Mirror on the part, got {len(mods)}"
+    mod = mods[0]
+    assert mod.mirror_object == body, "mirror object is not the active object"
+    assert tuple(mod.use_axis) == (True, False, False), tuple(mod.use_axis)
+    assert not mod.use_mirror_merge and not mod.use_clip, "merge/clip left on"
+    assert not body.modifiers, "the active object got a modifier"
+    assert _qm_verts(part) == 16, f"mirror did not double the part: {_qm_verts(part)}"
+    # A second axis goes on the same modifier, not a new one.
+    bpy.ops.et.quick_mirror(axis='Y', pivot='ACTIVE')
+    assert len(_qm_mirrors(part)) == 1, "a second axis stacked a second Mirror"
+    assert tuple(_qm_mirrors(part)[0].use_axis) == (True, True, False)
+    # Pressing both again takes the modifier away.
+    bpy.ops.et.quick_mirror(axis='X', pivot='ACTIVE')
+    bpy.ops.et.quick_mirror(axis='Y', pivot='ACTIVE')
+    assert not _qm_mirrors(part), "turning every axis off left the Mirror behind"
+    _qm_cleanup(part, body)
+
+check("Quick Mirror: across the active object, toggles per axis",
+      quick_mirror_across_active)
+
+
+def quick_mirror_stack_order():
+    body = _qm_cube("QM_Body", (0, 0, 0))
+    part = _qm_cube("QM_Part", (3, 0, 0))
+    part.modifiers.new("Bevel", 'BEVEL')
+    part.modifiers.new("WeightedNormal", 'WEIGHTED_NORMAL')
+    part.modifiers.new("Triangulate", 'TRIANGULATE')
+    _qm_select(part, body, active=body)
+    bpy.ops.et.quick_mirror(axis='X', pivot='ACTIVE')
+    order = [m.type for m in part.modifiers]
+    assert order == ['BEVEL', 'MIRROR', 'WEIGHTED_NORMAL', 'TRIANGULATE'], order
+    _qm_cleanup(part, body)
+
+check("Quick Mirror: goes before Weighted Normal and Triangulate",
+      quick_mirror_stack_order)
+
+
+def quick_mirror_several_parts():
+    body = _qm_cube("QM_Body", (0, 0, 0))
+    a = _qm_cube("QM_A", (3, 0, 0))
+    b = _qm_cube("QM_B", (3, 2, 0))
+    _qm_select(a, b, body, active=body)
+    bpy.ops.et.quick_mirror(axis='X', pivot='ACTIVE')
+    for p in (a, b):
+        assert len(_qm_mirrors(p)) == 1 and _qm_mirrors(p)[0].mirror_object == body, \
+            f"{p.name} was not mirrored"
+    _qm_cleanup(a, b, body)
+
+check("Quick Mirror: every selected part is mirrored", quick_mirror_several_parts)
+
+
+def quick_mirror_cursor_helper():
+    body = _qm_cube("QM_Body", (0, 0, 0))
+    part = _qm_cube("QM_Part", (3, 0, 0))
+    scene.cursor.location = (0, 5, 0)
+    _qm_select(part, body, active=body)
+    bpy.ops.et.quick_mirror(axis='Y', pivot='CURSOR')
+    mod = _qm_mirrors(part)[0]
+    helper = mod.mirror_object
+    assert helper is not None and helper.type == 'EMPTY', "no helper empty"
+    assert helper.get(et._MIRROR_HELPER_PROP) == 'CURSOR'
+    assert (helper.matrix_world.translation - scene.cursor.location).length < 1e-5, \
+        "helper is not at the 3D cursor"
+    assert not body.modifiers, "the active object got a modifier in cursor mode"
+    helper_name = helper.name
+    # The same click again takes the mirror and its helper away.
+    bpy.ops.et.quick_mirror(axis='Y', pivot='CURSOR')
+    assert not _qm_mirrors(part), "Mirror left after toggling off"
+    assert helper_name not in bpy.data.objects, "unused helper left in the file"
+    # One object alone may mirror around the cursor.
+    _qm_select(part, active=part)
+    assert bpy.ops.et.quick_mirror(axis='X', pivot='CURSOR') == {'FINISHED'}
+    assert len(_qm_mirrors(part)) == 1
+    scene.cursor.location = (0, 0, 0)
+    _qm_cleanup(part, body)
+
+check("Quick Mirror: 3D cursor pivot uses a helper and cleans it up",
+      quick_mirror_cursor_helper)
+
+
+def quick_mirror_world_axes():
+    import math
+    body = _qm_cube("QM_Body", (1, 1, 0))
+    body.rotation_euler = (0, 0, math.radians(45))
+    part = _qm_cube("QM_Part", (4, 1, 0))
+    bpy.context.view_layer.update()
+    _qm_select(part, body, active=body)
+    bpy.ops.et.quick_mirror(axis='X', pivot='WORLD')
+    helper = _qm_mirrors(part)[0].mirror_object
+    assert helper.parent == body, "world-axes helper does not follow the active"
+    bpy.context.view_layer.update()
+    mw = helper.matrix_world
+    assert (mw.translation - body.matrix_world.translation).length < 1e-5
+    rot = mw.to_quaternion()
+    assert rot.angle < 1e-4, f"helper is not on world axes: {rot}"
+    _qm_cleanup(part, body)
+
+check("Quick Mirror: world-axes pivot sits on the active object, unrotated",
+      quick_mirror_world_axes)
+
+
+def quick_mirror_refuses_alone_on_active():
+    part = _qm_cube("QM_Part", (3, 0, 0))
+    _qm_select(part, active=part)
+    assert bpy.ops.et.quick_mirror(axis='X', pivot='ACTIVE') == {'CANCELLED'}
+    assert not part.modifiers, "mirrored an object across itself"
+    _qm_cleanup(part)
+
+check("Quick Mirror: one object cannot mirror across itself",
+      quick_mirror_refuses_alone_on_active)
+
+
+def quick_mirror_suggests_axis():
+    body = _qm_cube("QM_Body", (0, 0, 0))
+    part = _qm_cube("QM_Part", (0.3, 0.2, -4))
+    got = et._suggested_mirror_axis(part, 'ACTIVE', body, scene)
+    assert got == 'Z', f"suggested {got}, expected Z"
+    _qm_cleanup(part, body)
+
+check("Quick Mirror: suggests the axis the part sits along", quick_mirror_suggests_axis)
+
+
+def quick_mirror_ui_bits():
+    valid = set(bpy.types.UILayout.bl_rna.functions['prop']
+                .parameters['icon'].enum_items.keys())
+    icons = {f'EVENT_{a}' for a in et._MIRROR_AXES}
+    icons |= {icon for _k, _l, _d, icon in et._MIRROR_PIVOTS}
+    missing = sorted(icons - valid)
+    assert not missing, f"unknown icons: {missing}"
+    # Registering a class gives it its own bl_rna; GizmoGroup has no
+    # is_registered and is not exposed under bpy.types by its id.
+    assert 'bl_rna' in et.ET_GGT_QuickMirror.__dict__, "gizmo group not registered"
+    assert scene.et_mirror_pivot == 'ACTIVE'
+
+check("Quick Mirror: icons exist and the buttons are registered", quick_mirror_ui_bits)
+
+
 # --- unregister ------------------------------------------------------------
 check("unregister()", et.unregister)
 

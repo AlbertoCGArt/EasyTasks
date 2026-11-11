@@ -4,6 +4,20 @@ All notable changes to Easy Tasks are recorded here.
 
 ## [Unreleased]
 
+### Added
+- **Quick Mirror.** Select the part, then the object to mirror it across, and
+  press X, Y or Z: the part gets a Mirror modifier with that object as its
+  Mirror Object, so the copy lands on the other side without moving an origin
+  or applying anything. The buttons float under the active object whenever two
+  or more objects are selected; the one beside them picks the pivot — the
+  active object on its own axes, the active object on world axes, or the 3D
+  cursor (the last two leave a small `_MirrorPivot` empty you can move to
+  adjust the mirror). Pressing a lit axis takes it off; the axis the part sits
+  along is highlighted as the likely one. Several parts can be mirrored at
+  once. Also in the Tools panel and in Q ▸ Quick Mirror, and the floating
+  buttons can be turned off in the add-on preferences.
+- **Mirror in Q ▸ Modifiers.** It was missing from the favourites list.
+
 ### Fixed
 - **Auto-route no longer takes objects away from other add-ons.** It routed
   every new object by name, including the ones a generator had just filed in
