@@ -2,7 +2,10 @@
 
 All notable changes to Easy Tasks are recorded here.
 
-## [Unreleased]
+## [2.7.0]
+
+Quick Mirror: mirror a part across another object, or the 3D cursor, with one
+click from buttons that float under the selection.
 
 ### Added
 - **Quick Mirror.** Select the part, then the object to mirror it across, and
