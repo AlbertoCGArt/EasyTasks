@@ -7,7 +7,7 @@ Built for environment and prop work: keep a scene tidy while you build it,
 check your forms and UVs without leaving the viewport, and batch out assets
 when you are done.
 
-**Blender 3.0 – 5.x** · GPL-3.0-or-later · by [Alberto Cordero](https://www.artstation.com/albertocordero)
+**Blender 3.0 – 5.x** · GPL-3.0-or-later · by [Alberto Cordero](https://3dartstuff.com/)
 
 **Free and open source.** Use it, modify it, ship commercial work with it — no
 licence to buy and nothing held back. If it saves you time and you'd like to
