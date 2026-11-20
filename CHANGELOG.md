@@ -2,6 +2,41 @@
 
 All notable changes to Easy Tasks are recorded here.
 
+## [Unreleased]
+
+A quieter interface that looks like one tool: fewer places each button lives,
+less added to Blender's own UI, and the Easy Tasks mark on its panels.
+
+### Changed — things that move or disappear
+- **The menu moved from `Q` to `Shift+Q`.** `Q` is Blender's Quick Favorites,
+  and the menu was hiding it in every 3D view. If you had rebound the menu
+  yourself, check its key in Preferences ▸ Add-ons ▸ Easy Tasks.
+- **The `Shift+Q` menu lists only Easy Tasks' own tools**, grouped like the
+  sidebar. It no longer re-offers Blender's own Export FBX / OBJ / GLB,
+  Append, Mark / Clear Asset, Link / Transfer Data, Mark Seam / Sharp or
+  Apply Transform under other names; put any of those you use in Quick
+  Favorites (right-click a menu entry ▸ Add to Quick Favorites). Apply
+  Transform is still in the `Ctrl+Shift+X` pie.
+- **The Add buttons in the viewport header are off by default.** They repeated
+  `Shift+A` in every viewport header. Turn them back on in Preferences ▸
+  Add-ons ▸ Easy Tasks. The Apply / Clear buttons in the Modifier panel stay
+  on and can now be turned off there too.
+- **The sidebar tab is "Easy Tasks"** (it was "EasyTasks"), with five panels
+  named for the job in hand: Organize, Model, Materials, Check, Export. Each
+  button is in one of them, and Blend Mask now sits under Materials.
+
+### Changed — look
+- The Easy Tasks mark is on each sidebar panel's header.
+- Groups are titled sections or collapsible subpanels instead of stacked
+  boxes. Assign to Category's naming options are a collapsed "Naming &
+  Behaviour" subpanel instead of a gear toggle.
+- Silhouette, Cavity, Face Stretch and Paint Blend Mask show they are on by
+  staying pressed in, as Blender's own toggles do, instead of their label
+  changing to "● ON".
+- Icons that meant several things now mean one: Project Structure, Origin to
+  Base, Drop It, Clean Up Mesh, Rename by Collection, Visibility Bookmark, UV
+  Health and Scene Stats each have their own.
+
 ## [2.7.0]
 
 Quick Mirror: mirror a part across another object, or the 3D cursor, with one

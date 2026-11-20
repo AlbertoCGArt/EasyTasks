@@ -3056,6 +3056,98 @@ def quick_mirror_ui_bits():
 check("Quick Mirror: icons exist and the buttons are registered", quick_mirror_ui_bits)
 
 
+# --- UI: every panel and menu draws, and the identity pieces are in place ---
+
+class _RecordingLayout:
+    """
+    Stands in for UILayout so draw() code can run headless. Every layout call
+    returns another recorder; operator and menu ids are collected so a button
+    pointing at something unregistered fails here rather than in someone's
+    sidebar.
+    """
+    def __init__(self, log):
+        object.__setattr__(self, '_log', log)
+
+    def __getattr__(self, name):
+        def call(*args, **kwargs):
+            if name in ('operator', 'menu', 'operator_menu_enum') and args:
+                self._log.append((name, args[0]))
+            return _RecordingLayout(self._log)
+        return call
+
+    def __setattr__(self, name, value):
+        pass
+
+
+def _draw_with_recorder(cls):
+    log = []
+    holder = type('Holder', (), {})()
+    holder.layout = _RecordingLayout(log)
+    cls.draw(holder, bpy.context)
+    header = cls.__dict__.get('draw_header')
+    if header is not None:
+        header(holder, bpy.context)
+    return log
+
+
+def ui_surfaces_draw():
+    drawn = [c for c in et.classes
+             if issubclass(c, (bpy.types.Panel, bpy.types.Menu))
+             and c is not et.ET_PT_BlendMaskPanel]    # needs a blended material
+    for cls in drawn:
+        for kind, ident in _draw_with_recorder(cls):
+            if kind == 'menu':
+                assert hasattr(bpy.types, ident), f"{cls.__name__} -> menu {ident}"
+            elif ident.startswith('et.'):
+                assert hasattr(bpy.ops.et, ident[3:]), f"{cls.__name__} -> {ident}"
+
+check("UI: every panel and menu draws, and every button resolves", ui_surfaces_draw)
+
+
+def ui_identity():
+    panels = [c for c in et.classes if issubclass(c, bpy.types.Panel)]
+    tabs = {c.bl_category for c in panels}
+    assert tabs == {'Easy Tasks'}, f"sidebar tabs: {tabs}"
+    top = [c for c in panels if not getattr(c, 'bl_parent_id', '')]
+    assert [c.bl_label for c in sorted(top, key=lambda c: c.bl_order)] == \
+        ['Organize', 'Model', 'Materials', 'Check', 'Export'], top
+    for cls in top:
+        assert getattr(cls, 'draw_header', None) is et.draw_brand_header, \
+            f"{cls.__name__} has no brand mark"
+    assert et._brand_previews is not None and 'mark' in et._brand_previews, \
+        "brand icon not loaded"
+    # Q stays Blender's Quick Favorites; the menu is on Shift+Q.
+    _km, kmi = et.addon_keymaps['fav_tools']
+    assert (kmi.type, kmi.shift, kmi.ctrl, kmi.alt) == ('Q', True, False, False), \
+        (kmi.type, kmi.shift)
+    # The menu wrappers around Blender's own operators are gone.
+    for gone in ('ET_MT_asset_menu', 'ET_MT_link_transfer_menu', 'ET_MT_uv_sharp_menu'):
+        assert not hasattr(bpy.types, gone), gone
+
+check("UI: one tab, five branded panels, menu on Shift+Q", ui_identity)
+
+
+def ui_optional_additions():
+    # Header add bar is opt-in, modifier buttons opt-out.
+    props = et.ET_AddonPreferences.__annotations__
+    assert props['header_add_bar'].keywords['default'] is False
+    assert props['modifier_buttons'].keywords['default'] is True
+
+    # Without preferences resolving (as here, loaded outside the add-on
+    # list) the header bar stays off and the modifier buttons stay on.
+    class Holder:
+        pass
+    log = []
+    holder = Holder()
+    holder.layout = _RecordingLayout(log)
+    et.draw_header_add_menu(holder, bpy.context)
+    assert not log, f"header bar drew without being enabled: {log}"
+    et.draw_modifier_panel_buttons(holder, bpy.context)
+    assert ('operator', 'et.apply_modifiers') in log, log
+
+check("UI: header bar opt-in, modifier buttons opt-out", ui_optional_additions)
+
+
 # --- unregister ------------------------------------------------------------
 check("unregister()", et.unregister)
 

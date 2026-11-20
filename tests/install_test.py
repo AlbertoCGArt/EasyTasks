@@ -62,6 +62,11 @@ keymap_names = {km.name for km, _kmi in mod.addon_keymaps.values()}
 check("keymaps registered in the 3D View keymap", keymap_names == {"3D View"},
       f"-> {keymap_names}")
 
+# the brand icon is a file beside __init__.py: proves the zip carried it
+check("brand icon shipped and loaded",
+      mod._brand_previews is not None and "mark" in mod._brand_previews,
+      f"-> {mod._BRAND_ICON_PATH}")
+
 bpy.ops.preferences.addon_disable(module=MODULE)
 check("addon disables cleanly", MODULE not in bpy.context.preferences.addons)
 

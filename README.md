@@ -22,8 +22,17 @@ support the work, [3dartstuff.com](https://3dartstuff.com).
 2. In Blender: **Edit ▸ Preferences ▸ Add-ons ▸ Install…**, pick the zip.
 3. Tick **Easy Tasks** to enable it.
 
-Tools appear in the **EasyTasks** tab of the 3D viewport sidebar (`N`), and on
-the shortcuts below.
+Tools appear in the **Easy Tasks** tab of the 3D viewport sidebar (`N`), and on
+the shortcuts below. The tab has five panels, one per job, each marked with the
+Easy Tasks logo:
+
+| Panel | Holds |
+| --- | --- |
+| **Organize** | Assign to Category, and the collection tools (Project Structure, Arrange Scene, Color Sync, Isolate, Select, Swap, Rename, Visibility Bookmark) |
+| **Model** | Origin, Drop It, Smart Duplicate, Place Reference Image, normals and mesh cleanup, Quick Mirror |
+| **Materials** | Megascans Material, Blend Materials, Consolidate — plus Blend Mask when a blended material is active |
+| **Check** | Silhouette / Cavity / Face Stretch previews, UV Health, Stacked UVs, statistics |
+| **Export** | Batch Export, Generate LODs, Scene Snapshot |
 
 > Install the zip, not the source folder. Blender takes the module name from the
 > folder inside the archive, and the add-on's preferences are keyed to it.
@@ -52,11 +61,17 @@ Or build a zip yourself:
 | Keys | Opens |
 | --- | --- |
 | `Ctrl` `Shift` `X` | Easy Tasks pie — overlays, collections, transforms, setup |
-| `Q` | FavTools menu — the full tool list |
+| `Shift` `Q` | Easy Tasks menu — every Easy Tasks tool, grouped like the sidebar |
 | `Shift` `Alt` `X` | Interaction mode pie — object/edit/sculpt, vert/edge/face |
 
 All three are rebindable in **Preferences ▸ Add-ons ▸ Easy Tasks**. They are
-bound in the 3D View keymap, so they do not shadow keys in other editors.
+bound in the 3D View keymap, so they do not shadow keys in other editors, and
+plain `Q` stays Blender's own Quick Favorites.
+
+The same preferences page turns off the two things Easy Tasks adds to Blender's
+own UI: **Apply / Clear** buttons in the Modifier Properties panel (on by
+default) and a row of **Add** buttons in the 3D viewport header (off by
+default).
 
 ---
 
@@ -175,8 +190,8 @@ left with an invisible overlay.
 Either mode scales the finished mask, so the overlay still prefers crevices
 within the area it's allowed. Left at **Any**, nothing changes.
 
-Once a blend is on the active object, an **ET: Blend Mask** panel appears in the
-sidebar with every control live on the material itself — Amount, Softness,
+Once a blend is on the active object, a **Blend Mask** panel appears under
+Materials in the sidebar with every control live on the material itself — Amount, Softness,
 Noise, axis buttons, Gradient/Face Angle, Strength, Falloff, Paint Influence.
 Adjust there rather than re-running the dialog: the dialog builds a *new*
 material each time, which would leave your painted mask behind. The panel edits
@@ -282,10 +297,10 @@ Things Blender can do, but not in one step.
 
 ## Menu shortcuts
 
-One-key access to things Blender already does — a pie and menus covering
-modifiers, UV seams and sharp edges, asset marking, link/transfer data, origin
-modes, interaction modes, apply transform, shading, select by type, and
-isolate / swap / select / rename by collection.
+One-key access to things Blender already does — two pies covering overlays,
+apply transform, shading, select by type, collection tools and interaction
+modes, and in the Shift+Q menu a list of favourite modifiers and the origin
+modes. Anything else from Blender belongs in its own Quick Favorites on `Q`.
 
 ---
 

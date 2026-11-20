@@ -97,7 +97,9 @@ for node in ast.walk(tree):
                 found = collect(item)
                 if found:
                     refs.setdefault(node.name, []).extend(found)
-        if attrs.get("bl_category") == "EasyTasks":
+        # Every ET_PT_* panel lives in the one sidebar tab. Keyed on the class
+        # name because bl_category is a shared constant, not a literal.
+        if node.name.startswith("ET_PT_"):
             sidebar_panels.append(node.name)
     elif isinstance(node, ast.FunctionDef) and node.name.startswith("draw_"):
         found = collect(node)

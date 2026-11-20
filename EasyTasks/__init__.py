@@ -18,7 +18,7 @@ bl_info = {
                    "Megascans import with paintable material blending.",
     "blender": (3, 0, 0),
     "version": (2, 7, 0),
-    "location": "View3D > Sidebar > EasyTasks, Ctrl+Shift+X, Shift+Alt+X, Q",
+    "location": "View3D > Sidebar > Easy Tasks, Ctrl+Shift+X, Shift+Alt+X, Shift+Q",
     "warning": "",
     "doc_url": "https://github.com/AlbertoCGArt/EasyTasks",
     "tracker_url": "https://github.com/AlbertoCGArt/EasyTasks/issues",
@@ -32,6 +32,7 @@ import numpy as np
 import mathutils
 import bmesh
 import bpy
+import bpy.utils.previews
 
 addon_keymaps    = {}
 _isolation_state = {}      # {lc_name: hide_viewport} when in isolation mode
@@ -233,6 +234,56 @@ def _prefs():
         return bpy.context.preferences.addons[__name__].preferences
     except (KeyError, AttributeError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# Identity: the Easy Tasks mark, and the one way sections are drawn
+# ---------------------------------------------------------------------------
+
+_BRAND_ICON_PATH = os.path.join(os.path.dirname(__file__), 'icons', 'easytasks.png')
+_brand_previews  = None
+
+
+def _load_brand_icon():
+    global _brand_previews
+    _unload_brand_icon()
+    _brand_previews = bpy.utils.previews.new()
+    if os.path.isfile(_BRAND_ICON_PATH):
+        _brand_previews.load('mark', _BRAND_ICON_PATH, 'IMAGE')
+
+
+def _unload_brand_icon():
+    global _brand_previews
+    if _brand_previews is not None:
+        bpy.utils.previews.remove(_brand_previews)
+        _brand_previews = None
+
+
+def _brand_icon():
+    """icon_value of the Easy Tasks mark, or 0 if it could not be loaded."""
+    if _brand_previews is None:
+        return 0
+    item = _brand_previews.get('mark')
+    return item.icon_id if item is not None else 0
+
+
+def draw_brand_header(self, context):
+    """Panel header: the mark beside the title, so the tab reads as one tool
+    rather than five stock-icon panels that could belong to anything."""
+    icon = _brand_icon()
+    if icon:
+        self.layout.label(text="", icon_value=icon)
+
+
+def _section(layout, text):
+    """
+    A titled group inside a panel. Headings are plain text and icons belong to
+    buttons: a heading icon beside a button icon made every group read as two
+    things, and the boxes they used to sit in stacked into a wall of frames.
+    """
+    col = layout.column(align=True)
+    col.label(text=text)
+    return col
 
 
 @bpy.app.handlers.persistent
@@ -487,7 +538,10 @@ def find_user_keyconfig(key):
 # Named icons, not icon_value integers: the numeric IDs shift between Blender
 # releases, so the old hardcoded values drew the wrong glyphs (or none).
 def draw_header_add_menu(self, context):
-    if context.mode != 'OBJECT':
+    # Off unless asked for: it repeats Shift+A in every viewport header and
+    # takes room the header's own menus need on a narrow editor.
+    prefs = _prefs()
+    if context.mode != 'OBJECT' or prefs is None or not prefs.header_add_bar:
         return
     layout = self.layout
     layout.separator()
@@ -502,7 +556,10 @@ def draw_header_add_menu(self, context):
 
 
 def draw_modifier_panel_buttons(self, context):
-    row = self.layout.box().row()
+    prefs = _prefs()
+    if prefs is not None and not prefs.modifier_buttons:
+        return
+    row = self.layout.row(align=True)
     row.operator('et.apply_modifiers', text='Apply Modifiers', icon='CHECKMARK')
     row.operator('et.clear_modifiers', text='Clear Modifiers', icon='TRASH')
 
@@ -1113,7 +1170,7 @@ def _quick_mirror_selection_fits(context):
 
     Not "two or more": every multi-selection made for something else (moving,
     joining, parenting a group) put the buttons on screen too. Mirroring
-    several parts at once is still in the Tools panel and Q menu.
+    several parts at once is still in the Model panel and the Shift+Q menu.
     """
     obj = context.active_object
     if obj is None or not obj.select_get():
@@ -1344,21 +1401,19 @@ class ET_MT_InteractionModePie(bpy.types.Menu):
     def draw(self, context):
         pie = self.layout.menu_pie()
 
-        box = pie.box()
-        col = box.box().column()
+        col = pie.box().column(align=True)
         col.operator('mesh.select_mode', text='Vertex', icon='VERTEXSEL').type = 'VERT'
         col.operator('mesh.select_mode', text='Edge',   icon='EDGESEL').type  = 'EDGE'
         col.operator('mesh.select_mode', text='Face',   icon='FACESEL').type  = 'FACE'
 
-        box = pie.box()
-        col = box.box().column()
+        col = pie.box().column(align=True)
         col.operator('object.mode_set', text='Object Mode',  icon='OBJECT_DATAMODE').mode  = 'OBJECT'
         col.operator('object.mode_set', text='Edit Mode',    icon='EDITMODE_HLT').mode     = 'EDIT'
         col.operator('object.mode_set', text='Sculpt Mode',  icon='SCULPTMODE_HLT').mode   = 'SCULPT'
 
 
 # ---------------------------------------------------------------------------
-# Menus (Modifiers, UV/Sharp, Asset, Link/Transfer, FavTools)
+# Menus (Modifiers, and the Easy Tasks menu on Shift+Q)
 # ---------------------------------------------------------------------------
 
 def _transform_apply_buttons(layout, texts):
@@ -1387,8 +1442,6 @@ class ET_MT_ModifiersMenu(bpy.types.Menu):
         layout.operator_context = "INVOKE_DEFAULT"
         layout.operator('object.modifier_add', text='Add Modifier', icon='MODIFIER')
         layout.separator()
-        layout.label(text='FAVORITE', icon='SOLO_ON')
-        layout.separator()
         MODS = [
             ('ARRAY',           'Array',               'MOD_ARRAY'),
             ('BEVEL',           'Bevel',               'MOD_BEVEL'),
@@ -1405,96 +1458,45 @@ class ET_MT_ModifiersMenu(bpy.types.Menu):
         layout.operator('et.clear_modifiers', text='Clear Modifiers', icon='X')
 
 
-class ET_MT_UVSharpMenu(bpy.types.Menu):
-    bl_idname = "ET_MT_uv_sharp_menu"
-    bl_label  = "UVs | Sharp Edge"
-
-    def draw(self, context):
-        layout = self.layout
-        layout.operator_context = "INVOKE_DEFAULT"
-        layout.label(text='Seams', icon='UV')
-        layout.separator()
-        layout.operator('mesh.mark_seam', text='Mark Seam', icon='UV_SYNC_SELECT')
-        layout.operator('mesh.mark_seam', text='Clear Seam', icon='X').clear = True
-        layout.separator()
-        layout.label(text='Sharp Edges', icon='NORMALS_FACE')
-        layout.separator()
-        layout.operator('mesh.mark_sharp', text='Mark Sharp', icon='SHARPCURVE')
-        layout.operator('mesh.mark_sharp', text='Clear Sharp', icon='X').clear = True
-
-
-class ET_MT_AssetMenu(bpy.types.Menu):
-    bl_idname = "ET_MT_asset_menu"
-    bl_label  = "Asset"
-
-    def draw(self, context):
-        layout = self.layout
-        layout.operator_context = "INVOKE_DEFAULT"
-        layout.operator('asset.mark',  text='Mark as Asset', icon='ASSET_MANAGER')
-        layout.operator('asset.clear', text='Clear Asset',   icon='X')
-
-
-class ET_MT_LinkTransferMenu(bpy.types.Menu):
-    bl_idname = "ET_MT_link_transfer_menu"
-    bl_label  = "Link / Transfer Data"
-
-    def draw(self, context):
-        layout = self.layout
-        layout.operator_context = "INVOKE_DEFAULT"
-        layout.operator('object.make_links_data', text='Link Object Data', icon='MESH_DATA').type  = 'OBDATA'
-        layout.operator('object.make_links_data', text='Link Material',    icon='MATERIAL').type   = 'MATERIAL'
-        layout.separator()
-        layout.operator('object.make_links_data', text='Copy Modifiers',   icon='MODIFIER').type   = 'MODIFIERS'
-        layout.operator('object.join_uvs',         text='Copy UV Maps',    icon='UV')
-
-
 class ET_MT_FavToolsMenu(bpy.types.Menu):
+    # The idname stays as it was so a shortcut someone rebound keeps working.
     bl_idname = "ET_MT_fav_tools_menu"
-    bl_label  = "FavTools"
+    bl_label  = "Easy Tasks"
 
     def draw(self, context):
+        # Only Easy Tasks' own tools, in the same groups as the sidebar tab.
+        # It used to be Q, a forty-row list that also re-offered Blender's
+        # exporters, Append, Mark Asset and Link Data under other names, and it
+        # took Q away from Quick Favorites, which is where those belong.
         layout = self.layout
         layout.operator_context = "INVOKE_DEFAULT"
-        layout.label(text='FavTools', icon='SOLO_ON')
+
+        layout.menu('ET_MT_semantic_menu', text='Assign to Category', icon='OUTLINER_COLLECTION')
+        layout.menu('ET_MT_organize_menu', text='Collections',        icon='OUTLINER')
         layout.separator()
-        layout.menu('ET_MT_modifiers_menu', text='Modifiers', icon='MODIFIER')
+
+        layout.menu('ET_MT_origin_menu',       text='Origin',       icon='OBJECT_ORIGIN')
         layout.menu('ET_MT_quick_mirror_menu', text='Quick Mirror', icon='MOD_MIRROR')
+        layout.menu('ET_MT_modifiers_menu',    text='Modifiers',    icon='MODIFIER')
+        layout.operator('et.drop_it',          text='Drop It',          icon='TRIA_DOWN_BAR')
+        layout.operator('et.smart_duplicate',  text='Smart Duplicate',  icon='DUPLICATE')
+        layout.operator('et.wnormals_bevel',   text='WNormals + Bevel', icon='MOD_NORMALEDIT')
+        layout.operator('et.correct_normals',  text='Correct Normals',  icon='NORMALS_FACE')
+        layout.operator('et.clean_up_mesh',    text='Clean Up Mesh',    icon='AUTOMERGE_ON')
         layout.separator()
-        layout.operator('et.batch_export', text='Batch Export', icon='EXPORT')
-        layout.separator()
-        layout.menu('ET_MT_uv_sharp_menu', text='UVs | Sharp Edge', icon='UV')
-        layout.separator()
-        _transform_apply_buttons(layout, ('Apply Scale', 'Apply Rotation',
-                                          'Apply Location'))
-        layout.separator()
-        layout.operator('export_scene.fbx',  text='Export FBX', icon='EXPORT').use_selection = True
-        layout.operator('wm.obj_export',     text='Export OBJ', icon='EXPORT')
-        layout.operator('export_scene.gltf', text='Export GLB', icon='EXPORT')
-        layout.operator('wm.append',         text='Append',     icon='APPEND_BLEND')
-        layout.separator()
-        layout.menu('ET_MT_origin_menu', text='Origin Tools', icon='OBJECT_ORIGIN')
-        layout.separator()
-        layout.menu('ET_MT_asset_menu',         text='Asset',              icon='ASSET_MANAGER')
-        layout.separator()
-        layout.menu('ET_MT_link_transfer_menu', text='Link/Transfer Data', icon='LINKED')
-        layout.separator()
-        layout.operator('et.scene_snapshot',        text='Scene Snapshot',        icon='FILE_TICK')
-        layout.operator('et.scene_stats',           text='Scene Statistics',      icon='INFO')
-        layout.separator()
-        layout.operator('et.generate_lods',         text='Generate LODs',         icon='MOD_DECIM')
+
         layout.operator('et.megascans_material',    text='Megascans Material',    icon='NODE_MATERIAL')
         layout.operator('et.blend_materials',       text='Blend Materials',       icon='MOD_MASK')
         layout.operator('et.paint_blend_mask',      text='Paint Blend Mask',      icon='BRUSH_DATA')
         layout.operator('et.consolidate_materials', text='Consolidate Materials', icon='MATERIAL')
-        layout.operator('et.place_reference_image', text='Place Reference Image', icon='IMAGE_REFERENCE')
         layout.separator()
-        # These two blocks used to be inlined here *and* duplicated in
-        # ET_MT_OrganizeMenu / ET_MT_AnalysisMenu, which were only reachable
-        # from two menus the pie stopped calling. Pointing at the submenus keeps
-        # one definition of each group and shortens this menu by eleven rows.
-        layout.menu('ET_MT_semantic_menu',  text='Assign to Category', icon='OUTLINER_COLLECTION')
-        layout.menu('ET_MT_organize_menu',  text='Organize',           icon='FILEBROWSER')
-        layout.menu('ET_MT_analysis_menu',  text='Analysis',           icon='VIEWZOOM')
+
+        layout.menu('ET_MT_analysis_menu', text='Check', icon='VIEWZOOM')
+        layout.separator()
+
+        layout.operator('et.batch_export',   text='Batch Export',   icon='EXPORT')
+        layout.operator('et.generate_lods',  text='Generate LODs',  icon='MOD_DECIM')
+        layout.operator('et.scene_snapshot', text='Scene Snapshot', icon='FILE_TICK')
 
 
 # ---------------------------------------------------------------------------
@@ -2047,6 +2049,8 @@ class ET_SemanticSettings(bpy.types.PropertyGroup):
         description="Tag the collection with the category colour, so "
                     "Collection Color Sync picks it up")
 
+    # No longer drawn (the options are a subpanel now). Kept registered so
+    # files saved with it still load without a property warning.
     show_options: bpy.props.BoolProperty(name="Options", default=False)
 
 
@@ -2197,19 +2201,17 @@ def draw_semantic_assign(layout, context):
     settings = scene.et_semantic
     root     = _project_root_collection(scene)
 
-    box = layout.box()
-    header = box.row(align=True)
-    header.label(text="Assign to Category", icon='OUTLINER_COLLECTION')
-    header.prop(settings, 'show_options', text='', icon='PREFERENCES', emboss=False)
+    # Drawn straight into its own subpanel: the panel header is the title, and
+    # the naming options are a collapsed child panel rather than a gear toggle.
 
     # --- project root ------------------------------------------------------
-    row = box.row(align=True)
+    row = layout.row(align=True)
     row.prop_search(settings, 'project_root', bpy.data, 'collections',
                     text="Project", icon='OUTLINER_COLLECTION')
     row.operator('et.scan_project', text="", icon='FILE_REFRESH')
 
     if root is None:
-        box.label(text="Pick a project root to use its hierarchy", icon='INFO')
+        layout.label(text="Pick a project root to use its hierarchy", icon='INFO')
 
     use_project = settings.source == 'PROJECT' and root is not None
 
@@ -2219,7 +2221,7 @@ def draw_semantic_assign(layout, context):
     # independent, so it was ambiguous whether Add Selection followed the root
     # or that field. The Quick Assign buttons below are the whole interface:
     # pick the root once, then one click per assignment.
-    col = box.column(align=True)
+    col = layout.column(align=True)
     if not use_project:
         if settings.use_custom:
             col.prop(settings, 'custom_category', text='',
@@ -2246,9 +2248,9 @@ def draw_semantic_assign(layout, context):
                      icon='ADD').category = ''
 
     # --- quick assign ------------------------------------------------------
-    box.separator(factor=0.4)
-    header = box.row(align=True)
-    header.label(text="Quick Assign", icon='PRESET')
+    layout.separator(factor=0.4)
+    header = layout.row(align=True)
+    header.label(text="Quick Assign")
     if root is not None:
         header.prop(settings, 'source', text="")
         header.operator('et.pick_quick_slots', text="", icon='CHECKBOX_HLT')
@@ -2256,13 +2258,13 @@ def draw_semantic_assign(layout, context):
     if use_project:
         slots = [s for s in scene.et_quick_slots if s.use]
         if not slots:
-            box.label(text="No collections picked — use the tick icon",
+            layout.label(text="No collections picked — use the tick icon",
                       icon='INFO')
         else:
             # Two columns, not three: collection names here are the user's own
             # and can be long, so a third column truncates them to "MODU…".
             # The presets below keep three because those names are short and fixed.
-            grid = box.grid_flow(row_major=True, columns=2, align=True)
+            grid = layout.grid_flow(row_major=True, columns=2, align=True)
             missing = 0
             for slot in slots:
                 coll = bpy.data.collections.get(slot.name)
@@ -2274,35 +2276,36 @@ def draw_semantic_assign(layout, context):
                               icon=_collection_icon(coll)
                               ).collection_name = slot.name
             if missing:
-                box.label(text=f"{missing} collection(s) gone — rescan",
+                layout.label(text=f"{missing} collection(s) gone — rescan",
                           icon='ERROR')
 
         # Anything not on a button is still one click away, without a second
         # always-visible field competing with the root picker.
-        row = box.row(align=True)
+        row = layout.row(align=True)
         row.operator('et.add_to_collection', text="Other…",
                      icon='VIEWZOOM').collection_name = ""
         row.operator('et.new_collection_for_selection', text="New…", icon='ADD')
     else:
-        grid = box.grid_flow(row_major=True, columns=3, align=True)
+        grid = layout.grid_flow(row_major=True, columns=3, align=True)
         for key, cat_label, icon, _color in SEMANTIC_CATEGORIES:
             grid.operator('et.assign_semantic', text=cat_label,
                           icon=icon).category = key
 
-    # --- options -----------------------------------------------------------
-    if settings.show_options:
-        opts = box.box()
-        opts.label(text="Naming", icon='SORTALPHA')
-        opts.prop(settings, 'pattern')
-        opts.prop(settings, 'project_source')
-        if settings.project_source == 'CUSTOM':
-            opts.prop(settings, 'custom_project')
 
-        opts.separator(factor=0.4)
-        opts.label(text="Behaviour", icon='OUTLINER')
-        opts.prop(settings, 'move')
-        opts.prop(settings, 'color_tag')
-        opts.prop(settings, 'use_custom')
+
+def draw_semantic_options(layout, context):
+    settings = context.scene.et_semantic
+    col = _section(layout, "Naming")
+    col.prop(settings, 'pattern')
+    col.prop(settings, 'project_source')
+    if settings.project_source == 'CUSTOM':
+        col.prop(settings, 'custom_project')
+
+    layout.separator(factor=0.4)
+    col = _section(layout, "Behaviour")
+    col.prop(settings, 'move')
+    col.prop(settings, 'color_tag')
+    col.prop(settings, 'use_custom')
 
 
 # ---------------------------------------------------------------------------
@@ -2531,7 +2534,7 @@ class ET_OT_VisibilityBookmark(bpy.types.Operator):
 
     def draw(self, context):
         layout = self.layout
-        layout.label(text="Snapshot which collections are visible/hidden,", icon='MARKER')
+        layout.label(text="Snapshot which collections are visible/hidden,", icon='BOOKMARKS')
         layout.label(text="then restore that state later by name.")
         layout.separator(factor=0.5)
         row = layout.row(align=True)
@@ -5152,7 +5155,7 @@ class ET_MT_OriginMenu(bpy.types.Menu):
         layout.operator('object.origin_set', text='Origin to Geometry',  icon='OBJECT_ORIGIN').type = 'ORIGIN_GEOMETRY'
         layout.operator('object.origin_set', text='Origin to 3D Cursor', icon='PIVOT_CURSOR').type  = 'ORIGIN_CURSOR'
         layout.operator('object.origin_set', text='Origin to Center of Mass', icon='PIVOT_MEDIAN').type = 'ORIGIN_CENTER_OF_MASS'
-        layout.operator('et.origin_to_base', text='Origin to Base',      icon='TRIA_DOWN')
+        layout.operator('et.origin_to_base', text='Origin to Base',      icon='ANCHOR_BOTTOM')
         layout.separator()
         layout.operator('object.origin_set', text='Geometry to Origin',  icon='OBJECT_DATAMODE').type = 'GEOMETRY_ORIGIN'
 
@@ -5887,22 +5890,25 @@ class ET_MT_SemanticMenu(bpy.types.Menu):
 
 class ET_MT_OrganizeMenu(bpy.types.Menu):
     bl_idname = "ET_MT_organize_menu"
-    bl_label  = "Organize"
+    bl_label  = "Collections"
 
     def draw(self, context):
         layout = self.layout
         layout.operator_context = "INVOKE_DEFAULT"
+        layout.operator('et.organize_scene',        text='Project Structure',    icon='COLLECTION_NEW')
+        layout.operator('et.arrange_scene',         text='Arrange Scene',        icon='OUTLINER')
+        layout.operator('et.collection_color_sync', text='Color Sync',           icon='COLOR')
+        layout.separator()
         layout.operator('et.isolate_collection',   text='Isolate Collection',   icon='HIDE_OFF')
         layout.operator('et.select_by_collection', text='Select by Collection', icon='RESTRICT_SELECT_OFF')
         layout.operator('et.swap_collections',     text='Swap Collections',     icon='ARROW_LEFTRIGHT')
-        layout.operator('et.rename_by_collection', text='Rename by Collection', icon='FONT_DATA')
-        layout.operator('et.visibility_bookmark',  text='Visibility Bookmark',  icon='MARKER')
-        layout.operator('et.collection_stats',     text='Collection Stats',     icon='SPREADSHEET')
+        layout.operator('et.rename_by_collection', text='Rename by Collection', icon='SORTALPHA')
+        layout.operator('et.visibility_bookmark',  text='Visibility Bookmark',  icon='BOOKMARKS')
 
 
 class ET_MT_AnalysisMenu(bpy.types.Menu):
     bl_idname = "ET_MT_analysis_menu"
-    bl_label  = "Analysis"
+    bl_label  = "Check"
 
     def draw(self, context):
         layout = self.layout
@@ -5910,9 +5916,12 @@ class ET_MT_AnalysisMenu(bpy.types.Menu):
         layout.operator('et.silhouette_check',      text='Silhouette Check',    icon='SHADING_SOLID')
         layout.operator('et.cavity_preview',        text='Cavity Preview',      icon='SHADING_RENDERED')
         layout.operator('et.face_stretch_analyzer', text='Face Stretch',        icon='MOD_UVPROJECT')
-        layout.operator('et.smart_duplicate',       text='Smart Duplicate',     icon='DUPLICATE')
-        layout.operator('et.uv_health',             text='UV Health Check',     icon='UV')
+        layout.separator()
+        layout.operator('et.uv_health',             text='UV Health Check',     icon='UV_DATA')
         layout.operator('et.stacked_uv_detector',   text='Stacked UV Detector', icon='UV_SYNC_SELECT')
+        layout.separator()
+        layout.operator('et.scene_stats',           text='Scene Stats',         icon='SCENE_DATA')
+        layout.operator('et.collection_stats',      text='Collection Stats',    icon='SPREADSHEET')
 
 
 class ET_MT_EasyTasksPie(bpy.types.Menu):
@@ -5928,7 +5937,7 @@ class ET_MT_EasyTasksPie(bpy.types.Menu):
         # pie fails to draw.
         space = context.space_data
         box = pie.box()
-        box.label(text='Overlay', icon='OVERLAY')
+        box.label(text='Overlay')
         if space is not None and space.type == 'VIEW_3D':
             box.prop(space.overlay, 'show_wireframes',       text='Wireframe')
             box.prop(space.shading, 'show_backface_culling', text='Backface Culling')
@@ -5943,29 +5952,29 @@ class ET_MT_EasyTasksPie(bpy.types.Menu):
         # (no diagonal slots — all 4 cardinals hold boxes so diagonals always clip)
         box = pie.box()
         col = box.column(align=True)
-        col.label(text="Collections", icon='OUTLINER_COLLECTION')
+        col.label(text="Collections")
         col.menu('ET_MT_semantic_menu',         text='Assign to Category',   icon='OUTLINER_COLLECTION')
         col.operator('et.isolate_collection',   text='Isolate Collection',   icon='HIDE_OFF')
         col.operator('et.swap_collections',     text='Swap Collections',     icon='ARROW_LEFTRIGHT')
-        col.operator('et.rename_by_collection', text='Rename by Collection', icon='FONT_DATA')
+        col.operator('et.rename_by_collection', text='Rename by Collection', icon='SORTALPHA')
         col.separator()
         col.menu('ET_MT_select_menu', text='Select by Type', icon='RESTRICT_SELECT_OFF')
 
         # Slot 3 – bottom: Apply Transform + Shading combined
         box = pie.box()
         col = box.column(align=True)
-        col.label(text="Apply Transform", icon='OBJECT_DATA')
+        col.label(text="Apply Transform")
         _transform_apply_buttons(col, ('Scale', 'Rotation', 'Location'))
         col.separator()
-        col.label(text="Shading", icon='NORMALS_FACE')
+        col.label(text="Shading")
         col.operator('object.shade_smooth', text='Shade Smooth', icon='MESH_CIRCLE')
         col.operator('object.shade_flat',   text='Shade Flat',   icon='MESH_PLANE')
 
         # Slot 4 – top: Setup
         box = pie.box()
         col = box.column(align=True)
-        col.label(text="Setup", icon='OUTLINER_COLLECTION')
-        col.operator('et.organize_scene', text='Project Structure', icon='OUTLINER_COLLECTION')
+        col.label(text="Setup")
+        col.operator('et.organize_scene', text='Project Structure', icon='COLLECTION_NEW')
         col.operator('et.arrange_scene',  text='Arrange Scene',     icon='OUTLINER')
 
 
@@ -5992,188 +6001,181 @@ class ET_AddonPreferences(bpy.types.AddonPreferences):
         description="Show the pivot and X / Y / Z mirror buttons under the "
                     "active object while exactly two objects are selected")
 
+    header_add_bar: bpy.props.BoolProperty(
+        name="Add Buttons in the Viewport Header",
+        default=False,
+        description="Plane, cube, circle, sphere, cylinder, text and empty "
+                    "buttons in the 3D viewport header, in Object Mode")
+
+    modifier_buttons: bpy.props.BoolProperty(
+        name="Apply / Clear in the Modifier Panel",
+        default=True,
+        description="Apply Modifiers and Clear Modifiers buttons at the end "
+                    "of the Modifier Properties panel")
+
     def draw(self, context):
         layout = self.layout
 
-        box = layout.box()
-        box.label(text='Behaviour', icon='PREFERENCES')
-        box.prop(self, 'auto_route')
-        box.prop(self, 'quick_mirror_buttons')
+        col = _section(layout, 'Behaviour')
+        col.prop(self, 'auto_route')
+        col.prop(self, 'quick_mirror_buttons')
 
-        shortcuts = (
-            ('easy_tasks_pie',      'EasyTasks Pie (Ctrl+Shift+X)', 'KEYINGSET'),
-            ('fav_tools',           'FavTools (Q)',                 'SOLO_ON'),
-            ('interaction_mode_pie','Interaction Mode Pie (Shift+Alt+X)', 'VIEW3D'),
-        )
-        for key, label, icon in shortcuts:
-            box = layout.box()
-            box.label(text=f'{label}:', icon=icon)
+        layout.separator()
+        col = _section(layout, "Added to Blender's Own UI")
+        col.prop(self, 'header_add_bar')
+        col.prop(self, 'modifier_buttons')
+
+        layout.separator()
+        col = _section(layout, 'Shortcuts')
+        for key, label in (('easy_tasks_pie',       'Easy Tasks Pie'),
+                           ('fav_tools',            'Easy Tasks Menu'),
+                           ('interaction_mode_pie', 'Interaction Mode Pie')):
+            row = col.row()
+            row.label(text=label)
             kmi = find_user_keyconfig(key)
             if kmi is None:
-                box.label(text='Keymap not registered', icon='ERROR')
+                row.label(text='Keymap not registered', icon='ERROR')
             else:
-                box.prop(kmi, 'type', text='', full_event=True)
+                row.prop(kmi, 'type', text='', full_event=True)
 
 
 # ---------------------------------------------------------------------------
-# N-Panel: ET: Scene
+# Sidebar: the Easy Tasks tab
+#
+# Five panels named for the job in hand — Organize, Model, Materials, Check,
+# Export — each carrying the Easy Tasks mark, so the tab reads as one tool.
+# Every button is in exactly one of them (tests/redundancy_test.py holds that).
+# Long groups are collapsible subpanels; short ones are titled sections.
 # ---------------------------------------------------------------------------
 
-class ET_PT_ScenePanel(bpy.types.Panel):
-    bl_label       = "Scene"
-    bl_idname      = "ET_PT_scene_panel"
+_TAB = 'Easy Tasks'
+
+
+class ET_PT_OrganizePanel(bpy.types.Panel):
+    bl_label       = "Organize"
+    bl_idname      = "ET_PT_organize_panel"
     bl_space_type  = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category    = 'EasyTasks'
+    bl_category    = _TAB
+    bl_order       = 1
+
+    draw_header = draw_brand_header
+
+    def draw(self, context):
+        pass                                   # everything is in the subpanels
+
+
+class ET_PT_AssignPanel(bpy.types.Panel):
+    bl_label       = "Assign to Category"
+    bl_idname      = "ET_PT_assign_panel"
+    bl_space_type  = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category    = _TAB
+    bl_parent_id   = "ET_PT_organize_panel"
     bl_order       = 1
 
     def draw(self, context):
-        layout = self.layout
-
-        draw_semantic_assign(layout, context)
-
-        box = layout.box()
-        box.label(text="Collections", icon='HIDE_OFF')
-        col = box.column(align=True)
-        col.operator('et.organize_scene',         text='Project Structure', icon='OUTLINER_COLLECTION')
-        col.operator('et.arrange_scene',          text='Arrange Scene',     icon='OUTLINER')
-        col.operator('et.collection_color_sync',  text='Color Sync',        icon='COLOR')
-
-        box = layout.box()
-        box.label(text="Organize", icon='OUTLINER_COLLECTION')
-        col = box.column(align=True)
-        col.operator('et.isolate_collection',    text='Isolate Collection',   icon='HIDE_OFF')
-        col.operator('et.select_by_collection',  text='Select by Collection', icon='RESTRICT_SELECT_OFF')
-        col.operator('et.swap_collections',      text='Swap Collections',     icon='ARROW_LEFTRIGHT')
-        col.operator('et.rename_by_collection',  text='Rename by Collection', icon='FONT_DATA')
-        col.operator('et.visibility_bookmark',   text='Visibility Bookmark',  icon='MARKER')
-        # Collection Stats lives in the Analysis panel next to Scene Stats.
-        # Both panels share the EasyTasks tab, so listing it here too put the
-        # same button on screen twice.
+        draw_semantic_assign(self.layout, context)
 
 
-# ---------------------------------------------------------------------------
-# N-Panel: ET: Tools
-# ---------------------------------------------------------------------------
-
-class ET_PT_ToolsPanel(bpy.types.Panel):
-    bl_label       = "Tools"
-    bl_idname      = "ET_PT_tools_panel"
+class ET_PT_AssignOptionsPanel(bpy.types.Panel):
+    bl_label       = "Naming & Behaviour"
+    bl_idname      = "ET_PT_assign_options_panel"
     bl_space_type  = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category    = 'EasyTasks'
+    bl_category    = _TAB
+    bl_parent_id   = "ET_PT_assign_panel"
+    bl_options     = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        draw_semantic_options(self.layout, context)
+
+
+class ET_PT_CollectionsPanel(bpy.types.Panel):
+    bl_label       = "Collections"
+    bl_idname      = "ET_PT_collections_panel"
+    bl_space_type  = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category    = _TAB
+    bl_parent_id   = "ET_PT_organize_panel"
     bl_order       = 2
 
     def draw(self, context):
         layout = self.layout
 
-        box = layout.box()
-        box.label(text="Origin", icon='OBJECT_ORIGIN')
-        row = box.row(align=True)
-        row.operator('object.origin_set', text='To Geometry',   icon='OBJECT_ORIGIN').type  = 'ORIGIN_GEOMETRY'
-        row.operator('et.origin_to_base', text='To Base',       icon='TRIA_DOWN')
-        row = box.row(align=True)
-        row.operator('object.origin_set', text='To Cursor',     icon='PIVOT_CURSOR').type   = 'ORIGIN_CURSOR'
-        row.operator('object.origin_set', text='Geo to Origin', icon='OBJECT_DATAMODE').type = 'GEOMETRY_ORIGIN'
+        col = _section(layout, "Setup")
+        col.operator('et.organize_scene',        text='Project Structure', icon='COLLECTION_NEW')
+        col.operator('et.arrange_scene',         text='Arrange Scene',     icon='OUTLINER')
+        col.operator('et.collection_color_sync', text='Color Sync',        icon='COLOR')
 
-        box = layout.box()
-        box.label(text="Object", icon='OBJECT_DATA')
-        col = box.column(align=True)
-        col.operator('et.drop_it',         text='Drop It',         icon='TRIA_DOWN')
-        col.operator('et.smart_duplicate', text='Smart Duplicate', icon='DUPLICATE')
-        col.separator()
-        col.operator('et.wnormals_bevel',  text='WNormals + Bevel', icon='MOD_NORMALEDIT')
-        col.operator('et.correct_normals', text='Correct Normals',  icon='NORMALS_VERTEX_FACE')
-        col.operator('et.clean_up_mesh',   text='Clean Up Mesh',    icon='BRUSH_DATA')
-
-        box = layout.box()
-        box.label(text="Quick Mirror", icon='MOD_MIRROR')
-        draw_quick_mirror(box.column(align=True), context)
-
-        box = layout.box()
-        box.label(text="Materials", icon='MATERIAL')
-        col = box.column(align=True)
-        col.operator('et.megascans_material',    text='Megascans Material',    icon='NODE_MATERIAL')
-        col.operator('et.blend_materials',       text='Blend Materials',       icon='MOD_MASK')
-        # Painting and the mask sliders live in the Blend Mask panel, which
-        # appears by itself once a blended material is active. Repeating them
-        # here would put the same button on screen twice in one tab.
-        col.separator()
-        col.operator('et.consolidate_materials', text='Consolidate Materials', icon='MATERIAL')
-
-        box = layout.box()
-        box.label(text="Scene", icon='SCENE_DATA')
-        col = box.column(align=True)
-        col.operator('et.generate_lods',         text='Generate LODs',         icon='MOD_DECIM')
-        col.operator('et.place_reference_image', text='Place Reference Image', icon='IMAGE_REFERENCE')
-        col.operator('et.scene_snapshot',        text='Scene Snapshot',        icon='FILE_TICK')
-
-        box = layout.box()
-        box.label(text="Export", icon='EXPORT')
-        box.operator('et.batch_export', text='Batch Export', icon='EXPORT')
+        col = _section(layout, "Work With")
+        col.operator('et.isolate_collection',    text='Isolate Collection',   icon='HIDE_OFF')
+        col.operator('et.select_by_collection',  text='Select by Collection', icon='RESTRICT_SELECT_OFF')
+        col.operator('et.swap_collections',      text='Swap Collections',     icon='ARROW_LEFTRIGHT')
+        col.operator('et.rename_by_collection',  text='Rename by Collection', icon='SORTALPHA')
+        col.operator('et.visibility_bookmark',   text='Visibility Bookmark',  icon='BOOKMARKS')
 
 
-# ---------------------------------------------------------------------------
-# N-Panel: ET: Analysis
-# ---------------------------------------------------------------------------
-
-class ET_PT_AnalysisPanel(bpy.types.Panel):
-    bl_label       = "Analysis"
-    bl_idname      = "ET_PT_analysis_panel"
+class ET_PT_ModelPanel(bpy.types.Panel):
+    bl_label       = "Model"
+    bl_idname      = "ET_PT_model_panel"
     bl_space_type  = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category    = 'EasyTasks'
-    bl_order       = 3
+    bl_category    = _TAB
+    bl_order       = 2
+
+    draw_header = draw_brand_header
 
     def draw(self, context):
         layout = self.layout
 
-        box = layout.box()
-        box.label(text="Viewport Preview", icon='SHADING_SOLID')
-        col        = box.column(align=True)
-        # Preview state is per-viewport, so the toggle reflects this panel's own
-        # 3D view rather than whichever viewport was touched last.
-        preview    = _active_preview(context.space_data)
-        sil_on     = preview == 'SILHOUETTE'
-        cavity_on  = preview == 'CAVITY'
-        stretch_on = bool(_stretch_state)
-        col.operator('et.silhouette_check',
-                     text='Silhouette  ●  ON' if sil_on else 'Silhouette Check',
-                     icon='SHADING_SOLID',
-                     depress=sil_on)
-        col.operator('et.cavity_preview',
-                     text='Cavity  ●  ON' if cavity_on else 'Cavity Preview',
-                     icon='SHADING_RENDERED',
-                     depress=cavity_on)
-        col.operator('et.face_stretch_analyzer',
-                     text='Face Stretch  ●  ON' if stretch_on else 'Face Stretch',
-                     icon='MOD_UVPROJECT',
-                     depress=stretch_on)
+        col = _section(layout, "Origin")
+        row = col.row(align=True)
+        row.operator('object.origin_set', text='To Geometry',   icon='OBJECT_ORIGIN').type   = 'ORIGIN_GEOMETRY'
+        row.operator('et.origin_to_base', text='To Base',       icon='ANCHOR_BOTTOM')
+        row = col.row(align=True)
+        row.operator('object.origin_set', text='To Cursor',     icon='PIVOT_CURSOR').type    = 'ORIGIN_CURSOR'
+        row.operator('object.origin_set', text='Geo to Origin', icon='OBJECT_DATAMODE').type = 'GEOMETRY_ORIGIN'
 
-        box = layout.box()
-        box.label(text="UV", icon='UV')
-        col = box.column(align=True)
-        col.operator('et.uv_health',          text='UV Health Check',    icon='UV')
-        col.operator('et.stacked_uv_detector', text='Stacked UV Detector', icon='UV_SYNC_SELECT')
+        col = _section(layout, "Object")
+        col.operator('et.drop_it',               text='Drop It',               icon='TRIA_DOWN_BAR')
+        col.operator('et.smart_duplicate',       text='Smart Duplicate',       icon='DUPLICATE')
+        col.operator('et.place_reference_image', text='Place Reference Image', icon='IMAGE_REFERENCE')
 
-        box = layout.box()
-        box.label(text="Statistics", icon='INFO')
-        row = box.row(align=True)
-        row.operator('et.scene_stats',      text='Scene Stats',      icon='INFO')
-        row.operator('et.collection_stats', text='Collection Stats', icon='SPREADSHEET')
+        col = _section(layout, "Mesh")
+        col.operator('et.wnormals_bevel',  text='WNormals + Bevel', icon='MOD_NORMALEDIT')
+        col.operator('et.correct_normals', text='Correct Normals',  icon='NORMALS_FACE')
+        col.operator('et.clean_up_mesh',   text='Clean Up Mesh',    icon='AUTOMERGE_ON')
+
+        draw_quick_mirror(_section(layout, "Quick Mirror"), context)
 
 
-# ---------------------------------------------------------------------------
-# N-Panel: ET: Blend Mask  (only while a blended material is active)
-# ---------------------------------------------------------------------------
+class ET_PT_MaterialsPanel(bpy.types.Panel):
+    bl_label       = "Materials"
+    bl_idname      = "ET_PT_materials_panel"
+    bl_space_type  = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category    = _TAB
+    bl_order       = 3
+
+    draw_header = draw_brand_header
+
+    def draw(self, context):
+        col = self.layout.column(align=True)
+        col.operator('et.megascans_material',    text='Megascans Material',    icon='NODE_MATERIAL')
+        col.operator('et.blend_materials',       text='Blend Materials',       icon='MOD_MASK')
+        col.operator('et.consolidate_materials', text='Consolidate Materials', icon='MATERIAL')
+        # Painting and the mask sliders are in the Blend Mask subpanel, which
+        # appears by itself once a blended material is active.
+
 
 class ET_PT_BlendMaskPanel(bpy.types.Panel):
     bl_label       = "Blend Mask"
     bl_idname      = "ET_PT_blend_mask_panel"
     bl_space_type  = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category    = 'EasyTasks'
-    bl_order       = 4
+    bl_category    = _TAB
+    bl_parent_id   = "ET_PT_materials_panel"
 
     @classmethod
     def poll(cls, context):
@@ -6187,65 +6189,110 @@ class ET_PT_BlendMaskPanel(bpy.types.Panel):
 
         obj = context.active_object
         layout.label(text=obj.active_material.name, icon='MATERIAL')
-
-        box = layout.box()
-        box.label(text="Preset", icon='PRESET')
-        box.operator_menu_enum('et.apply_blend_preset', 'preset',
-                               text="Load a Preset")
+        layout.operator_menu_enum('et.apply_blend_preset', 'preset',
+                                  text="Load a Preset", icon='PRESET')
 
         def slider(parent, socket_name, label):
             socket = node.inputs.get(socket_name)
             if socket is not None:
                 parent.prop(socket, 'default_value', text=label)
 
-        box = layout.box()
-        box.label(text="Mask", icon='MOD_MASK')
-        col = box.column(align=True)
+        col = _section(layout, "Mask")
         slider(col, 'Amount',      'Overlay Amount')
         slider(col, 'Softness',    'Softness')
         slider(col, 'Noise Scale', 'Noise Scale')
 
-        box = layout.box()
-        box.label(text="Direction", icon='NORMALS_FACE')
-        row = box.row(align=True)
+        col = _section(layout, "Direction")
+        row = col.row(align=True)
         row.operator('et.set_blend_axis', text='Up').axis   = 'UP'
         row.operator('et.set_blend_axis', text='Down').axis = 'DOWN'
-        row = box.row(align=True)
+        row = col.row(align=True)
         row.operator('et.set_blend_axis', text='+X').axis = 'X'
         row.operator('et.set_blend_axis', text='-X').axis = 'NEG_X'
         row.operator('et.set_blend_axis', text='+Y').axis = 'Y'
         row.operator('et.set_blend_axis', text='-Y').axis = 'NEG_Y'
-        col = box.column(align=True)
+        col.separator(factor=0.5)
         slider(col, 'Gradient',          'Gradient / Face Angle')
         slider(col, 'Directionality',    'Strength')
         slider(col, 'Direction Falloff', 'Falloff')
 
-        box = layout.box()
-        box.label(text="Paint", icon='BRUSH_DATA')
+        col = _section(layout, "Paint")
         painting = obj.mode in {'TEXTURE_PAINT', 'VERTEX_PAINT'}
-        box.operator('et.paint_blend_mask',
-                     text='Painting  ●  ON' if painting else 'Paint Blend Mask',
-                     icon='BRUSH_DATA',
-                     depress=painting)
+        # Pressed in while painting: the button's own state says it, the way
+        # Blender's toggles do, instead of the label changing width.
+        col.operator('et.paint_blend_mask', text='Paint Blend Mask',
+                     icon='BRUSH_DATA', depress=painting)
         if not painting:
             # Which layer to paint on. The highlighted one is what the plain
             # button above uses; the other starts (or returns to) that layer.
             current = _default_paint_type(obj, node)
-            row = box.row(align=True)
+            row = col.row(align=True)
             row.label(text="Paint On")
             for kind, text, icon in (('IMAGE', "Image", 'IMAGE_DATA'),
                                      ('VERTEX', "Vertex Color", 'VPAINT_HLT')):
                 row.operator('et.paint_blend_mask', text=text, icon=icon,
                              depress=(current == kind)).mask_type = kind
-        slider(box, 'Paint Influence', 'Paint Influence')
+        slider(col, 'Paint Influence', 'Paint Influence')
 
         # Unsaved paint renders as an unpainted mask, so say so where it will
         # be seen rather than leaving it to be discovered at render time.
         image = _blend_paint_image(node)
         if image is not None and image.is_dirty:
-            box.label(text="Unsaved paint — renders blank", icon='ERROR')
-            box.operator('et.save_blend_mask', text='Save Painted Mask',
+            col.label(text="Unsaved paint — renders blank", icon='ERROR')
+            col.operator('et.save_blend_mask', text='Save Painted Mask',
                          icon='FILE_TICK')
+
+
+class ET_PT_CheckPanel(bpy.types.Panel):
+    bl_label       = "Check"
+    bl_idname      = "ET_PT_check_panel"
+    bl_space_type  = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category    = _TAB
+    bl_order       = 4
+
+    draw_header = draw_brand_header
+
+    def draw(self, context):
+        layout = self.layout
+
+        # Preview state is per-viewport, so each toggle reflects this panel's
+        # own 3D view rather than whichever viewport was touched last. On is
+        # shown by the button staying pressed in, as Blender's own toggles do.
+        preview = _active_preview(context.space_data)
+        col = _section(layout, "Viewport Preview")
+        col.operator('et.silhouette_check',      text='Silhouette',   icon='SHADING_SOLID',
+                     depress=preview == 'SILHOUETTE')
+        col.operator('et.cavity_preview',        text='Cavity',       icon='SHADING_RENDERED',
+                     depress=preview == 'CAVITY')
+        col.operator('et.face_stretch_analyzer', text='Face Stretch', icon='MOD_UVPROJECT',
+                     depress=bool(_stretch_state))
+
+        col = _section(layout, "UV")
+        col.operator('et.uv_health',           text='UV Health Check',     icon='UV_DATA')
+        col.operator('et.stacked_uv_detector', text='Stacked UV Detector', icon='UV_SYNC_SELECT')
+
+        col = _section(layout, "Statistics")
+        row = col.row(align=True)
+        row.operator('et.scene_stats',      text='Scene',       icon='SCENE_DATA')
+        row.operator('et.collection_stats', text='Collections', icon='SPREADSHEET')
+
+
+class ET_PT_ExportPanel(bpy.types.Panel):
+    bl_label       = "Export"
+    bl_idname      = "ET_PT_export_panel"
+    bl_space_type  = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category    = _TAB
+    bl_order       = 5
+
+    draw_header = draw_brand_header
+
+    def draw(self, context):
+        col = self.layout.column(align=True)
+        col.operator('et.batch_export',   text='Batch Export',   icon='EXPORT')
+        col.operator('et.generate_lods',  text='Generate LODs',  icon='MOD_DECIM')
+        col.operator('et.scene_snapshot', text='Scene Snapshot', icon='FILE_TICK')
 
 
 # ---------------------------------------------------------------------------
@@ -6508,9 +6555,6 @@ classes = (
     ET_OT_BatchExport,
     ET_MT_InteractionModePie,
     ET_MT_ModifiersMenu,
-    ET_MT_UVSharpMenu,
-    ET_MT_AssetMenu,
-    ET_MT_LinkTransferMenu,
     ET_MT_FavToolsMenu,
     ET_OT_OrganizeScene,
     ET_OT_ArrangeScene,
@@ -6554,11 +6598,16 @@ classes = (
     ET_MT_AnalysisMenu,
     ET_MT_EasyTasksPie,
     ET_AddonPreferences,
-    # N-Panels
-    ET_PT_ScenePanel,
-    ET_PT_ToolsPanel,
-    ET_PT_AnalysisPanel,
+    # Sidebar panels: parents before the subpanels that name them.
+    ET_PT_OrganizePanel,
+    ET_PT_AssignPanel,
+    ET_PT_AssignOptionsPanel,
+    ET_PT_CollectionsPanel,
+    ET_PT_ModelPanel,
+    ET_PT_MaterialsPanel,
     ET_PT_BlendMaskPanel,
+    ET_PT_CheckPanel,
+    ET_PT_ExportPanel,
 )
 
 
@@ -6569,7 +6618,10 @@ classes = (
 _KEYMAP_SPEC = (
     ('easy_tasks_pie',       'wm.call_menu_pie', 'X', {'ctrl': True, 'shift': True},
      'ET_MT_easy_tasks_pie'),
-    ('fav_tools',            'wm.call_menu',     'Q', {},
+    # Shift+Q, not Q: plain Q is Blender's Quick Favorites, which the menu
+    # used to hide in every 3D view. Shift+Q is unbound in the 3D View on
+    # 3.0-5.2 (only the Grease Pencil modes use it, and their keymaps win there).
+    ('fav_tools',            'wm.call_menu',     'Q', {'shift': True},
      'ET_MT_fav_tools_menu'),
     ('interaction_mode_pie', 'wm.call_menu_pie', 'X', {'alt': True, 'shift': True},
      'ET_MT_interaction_mode_pie'),
@@ -6588,6 +6640,7 @@ _STATE_HANDLERS = (
 
 
 def register():
+    _load_brand_icon()
     for cls in classes:
         bpy.utils.register_class(cls)
 
@@ -6671,3 +6724,4 @@ def unregister():
 
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+    _unload_brand_icon()
