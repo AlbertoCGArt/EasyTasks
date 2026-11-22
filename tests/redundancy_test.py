@@ -60,7 +60,7 @@ def collect(node):
                 # operator_menu_enum draws one operator as a dropdown of its
                 # enum values — a real UI route, and the only sane widget for
                 # something like a preset list.
-                and sub.func.attr in ("operator", "menu", "operator_menu_enum")
+                and sub.func.attr in ("operator", "menu", "operator_menu_enum", "popover")
                 and sub.args
                 and isinstance(sub.args[0], ast.Constant)):
             ident = sub.args[0].value
@@ -99,7 +99,8 @@ for node in ast.walk(tree):
                     refs.setdefault(node.name, []).extend(found)
         # Every ET_PT_* panel lives in the one sidebar tab. Keyed on the class
         # name because bl_category is a shared constant, not a literal.
-        if node.name.startswith("ET_PT_"):
+        # A HEADER-region panel is a popover, not part of the sidebar.
+        if node.name.startswith("ET_PT_") and attrs.get("bl_region_type") != "HEADER":
             sidebar_panels.append(node.name)
     elif isinstance(node, ast.FunctionDef) and node.name.startswith("draw_"):
         found = collect(node)

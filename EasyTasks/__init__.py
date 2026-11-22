@@ -1090,15 +1090,21 @@ def draw_quick_mirror(layout, context):
         op.side = side
 
 
-class ET_MT_QuickMirrorMenu(bpy.types.Menu):
-    bl_idname = "ET_MT_quick_mirror_menu"
-    bl_label  = "Quick Mirror"
+class ET_PT_QuickMirrorPopover(bpy.types.Panel):
+    """Quick Mirror as it opens from the Shift+Q menu. A popover rather than a
+    submenu: in a menu the Pivot and Side rows turned into menu entries spread
+    across the window, and picking one closed the menu before an axis could be
+    pressed."""
+    bl_idname      = "ET_PT_quick_mirror_popover"
+    bl_label       = "Quick Mirror"
+    bl_space_type  = 'VIEW_3D'
+    bl_region_type = 'HEADER'
+    bl_ui_units_x  = 15
 
     def draw(self, context):
         layout = self.layout
         layout.label(text='Part first, then the object to mirror across',
                      icon='INFO')
-        layout.separator()
         draw_quick_mirror(layout, context)
 
 
@@ -1476,7 +1482,7 @@ class ET_MT_FavToolsMenu(bpy.types.Menu):
         layout.separator()
 
         layout.menu('ET_MT_origin_menu',       text='Origin',       icon='OBJECT_ORIGIN')
-        layout.menu('ET_MT_quick_mirror_menu', text='Quick Mirror', icon='MOD_MIRROR')
+        layout.popover('ET_PT_quick_mirror_popover', text='Quick Mirror', icon='MOD_MIRROR')
         layout.menu('ET_MT_modifiers_menu',    text='Modifiers',    icon='MODIFIER')
         layout.operator('et.drop_it',          text='Drop It',          icon='TRIA_DOWN_BAR')
         layout.operator('et.smart_duplicate',  text='Smart Duplicate',  icon='DUPLICATE')
@@ -6550,7 +6556,7 @@ classes = (
     ET_OT_ClearModifiers,
     ET_OT_AddModifier,
     ET_OT_QuickMirror,
-    ET_MT_QuickMirrorMenu,
+    ET_PT_QuickMirrorPopover,
     ET_GGT_QuickMirror,
     ET_OT_BatchExport,
     ET_MT_InteractionModePie,

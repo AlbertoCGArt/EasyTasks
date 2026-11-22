@@ -3070,7 +3070,7 @@ class _RecordingLayout:
 
     def __getattr__(self, name):
         def call(*args, **kwargs):
-            if name in ('operator', 'menu', 'operator_menu_enum') and args:
+            if name in ('operator', 'menu', 'operator_menu_enum', 'popover') and args:
                 self._log.append((name, args[0]))
             return _RecordingLayout(self._log)
         return call
@@ -3096,8 +3096,8 @@ def ui_surfaces_draw():
              and c is not et.ET_PT_BlendMaskPanel]    # needs a blended material
     for cls in drawn:
         for kind, ident in _draw_with_recorder(cls):
-            if kind == 'menu':
-                assert hasattr(bpy.types, ident), f"{cls.__name__} -> menu {ident}"
+            if kind in ('menu', 'popover'):
+                assert hasattr(bpy.types, ident), f"{cls.__name__} -> {kind} {ident}"
             elif ident.startswith('et.'):
                 assert hasattr(bpy.ops.et, ident[3:]), f"{cls.__name__} -> {ident}"
 
@@ -3105,7 +3105,9 @@ check("UI: every panel and menu draws, and every button resolves", ui_surfaces_d
 
 
 def ui_identity():
-    panels = [c for c in et.classes if issubclass(c, bpy.types.Panel)]
+    # Sidebar panels only: the Quick Mirror popover opens from Shift+Q.
+    panels = [c for c in et.classes if issubclass(c, bpy.types.Panel)
+              and c.bl_region_type == 'UI']
     tabs = {c.bl_category for c in panels}
     assert tabs == {'Easy Tasks'}, f"sidebar tabs: {tabs}"
     top = [c for c in panels if not getattr(c, 'bl_parent_id', '')]
@@ -3123,6 +3125,12 @@ def ui_identity():
     # The menu wrappers around Blender's own operators are gone.
     for gone in ('ET_MT_asset_menu', 'ET_MT_link_transfer_menu', 'ET_MT_uv_sharp_menu'):
         assert not hasattr(bpy.types, gone), gone
+    # Quick Mirror opens as a popover from Shift+Q: as a submenu its Pivot and
+    # Side rows spread across the window and closed the menu when picked.
+    log = _draw_with_recorder(et.ET_MT_FavToolsMenu)
+    assert ('popover', 'ET_PT_quick_mirror_popover') in log, log
+    assert not hasattr(bpy.types, 'ET_MT_quick_mirror_menu')
+    assert ('operator', 'et.quick_mirror') in         _draw_with_recorder(et.ET_PT_QuickMirrorPopover)
 
 check("UI: one tab, five branded panels, menu on Shift+Q", ui_identity)
 
