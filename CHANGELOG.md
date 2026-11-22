@@ -2,7 +2,9 @@
 
 All notable changes to Easy Tasks are recorded here.
 
-## [Unreleased]
+## [2.8.1]
+
+A fix for Quick Mirror in the `Shift+Q` menu.
 
 ### Fixed
 - **Quick Mirror from `Shift+Q` opens as a small panel.** As a submenu, its
