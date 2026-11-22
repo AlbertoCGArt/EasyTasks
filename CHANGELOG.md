@@ -2,7 +2,7 @@
 
 All notable changes to Easy Tasks are recorded here.
 
-## [Unreleased]
+## [2.8.0]
 
 A quieter interface that looks like one tool: fewer places each button lives,
 less added to Blender's own UI, and the Easy Tasks mark on its panels.
