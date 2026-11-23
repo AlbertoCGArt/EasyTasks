@@ -2,7 +2,10 @@
 
 All notable changes to Easy Tasks are recorded here.
 
-## [Unreleased]
+## [2.8.2]
+
+Quick Mirror opens on hover in the `Shift+Q` menu, and the Modifiers list
+has seven more.
 
 ### Changed
 - **More modifiers in `Shift+Q` ▸ Modifiers**: Boolean, Decimate, Triangulate,
