@@ -3072,6 +3072,8 @@ class _RecordingLayout:
         def call(*args, **kwargs):
             if name in ('operator', 'menu', 'operator_menu_enum', 'popover') and args:
                 self._log.append((name, args[0]))
+            elif name == 'prop_menu_enum' and args:
+                self._log.append((name, type(args[0]).__name__))
             return _RecordingLayout(self._log)
         return call
 
@@ -3105,7 +3107,7 @@ check("UI: every panel and menu draws, and every button resolves", ui_surfaces_d
 
 
 def ui_identity():
-    # Sidebar panels only: the Quick Mirror popover opens from Shift+Q.
+    # Sidebar panels only; a HEADER-region panel would be a popover.
     panels = [c for c in et.classes if issubclass(c, bpy.types.Panel)
               and c.bl_region_type == 'UI']
     tabs = {c.bl_category for c in panels}
@@ -3125,14 +3127,42 @@ def ui_identity():
     # The menu wrappers around Blender's own operators are gone.
     for gone in ('ET_MT_asset_menu', 'ET_MT_link_transfer_menu', 'ET_MT_uv_sharp_menu'):
         assert not hasattr(bpy.types, gone), gone
-    # Quick Mirror opens as a popover from Shift+Q: as a submenu its Pivot and
-    # Side rows spread across the window and closed the menu when picked.
+    # Quick Mirror in Shift+Q is a submenu, so it opens on hover like the
+    # rest (a popover needed a click), made of menu entries: the panel's
+    # button rows spread across the window when drawn in a menu.
     log = _draw_with_recorder(et.ET_MT_FavToolsMenu)
-    assert ('popover', 'ET_PT_quick_mirror_popover') in log, log
-    assert not hasattr(bpy.types, 'ET_MT_quick_mirror_menu')
-    assert ('operator', 'et.quick_mirror') in         _draw_with_recorder(et.ET_PT_QuickMirrorPopover)
+    assert ('menu', 'ET_MT_quick_mirror_menu') in log, log
+    assert not any(kind == 'popover' for kind, _ident in log), log
+    log = _draw_with_recorder(et.ET_MT_QuickMirrorMenu)
+    assert log.count(('operator', 'et.quick_mirror')) == 3, log
+    assert log.count(('prop_menu_enum', 'Scene')) == 2, log
 
 check("UI: one tab, five branded panels, menu on Shift+Q", ui_identity)
+
+
+def modifier_favourites():
+    valid = bpy.types.Modifier.bl_rna.properties['type'].enum_items.keys()
+    listed = [t for group in et._FAVOURITE_MODIFIERS for t, _l, _i in group]
+    assert len(listed) == len(set(listed)), listed
+    assert set(listed) <= set(valid), set(listed) - set(valid)
+    for o in list(bpy.context.selected_objects):
+        o.select_set(False)
+    bpy.ops.mesh.primitive_cube_add()
+    cube = bpy.context.active_object
+    for t in listed:
+        assert bpy.ops.et.add_modifier(modifier_type=t) == {'FINISHED'}, t
+    names = [m.name for m in cube.modifiers]
+    # Blender's own names, not the type codes
+    assert 'Weighted Normal' in names and 'WEIGHTED_NORMAL' not in names, names
+    assert len(cube.modifiers) == len(listed), names
+    # an object that takes no modifiers is reported, not a traceback
+    bpy.ops.object.empty_add()
+    assert bpy.ops.et.add_modifier(modifier_type='BEVEL') == {'CANCELLED'}
+    empty = bpy.context.active_object
+    for ob in (cube, empty):
+        bpy.data.objects.remove(ob)
+
+check("Modifiers menu: every favourite adds, with Blender's names", modifier_favourites)
 
 
 def ui_optional_additions():

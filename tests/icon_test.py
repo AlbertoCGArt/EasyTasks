@@ -27,6 +27,9 @@ valid = set(bpy.types.UILayout.bl_rna.functions['prop'].parameters['icon'].enum_
 source = open(SRC, encoding='utf-8').read()
 used = set(re.findall(r"icon\s*=\s*'([A-Z0-9_]+)'", source))
 used |= {icon for _k, _l, icon, _c in et.SEMANTIC_CATEGORIES}
+# icons kept in tables and passed to icon= through a variable
+used |= {icon for group in et._FAVOURITE_MODIFIERS for _t, _l, icon in group}
+used |= {icon for _k, _l, _d, icon in et._MIRROR_PIVOTS + et._MIRROR_SIDES}
 
 # _collection_icon() builds names at runtime from a collection's colour tag, so
 # the literal regex above cannot see them. Exercise it over every tag instead.

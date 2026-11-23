@@ -2,6 +2,21 @@
 
 All notable changes to Easy Tasks are recorded here.
 
+## [Unreleased]
+
+### Changed
+- **More modifiers in `Shift+Q` ▸ Modifiers**: Boolean, Decimate, Triangulate,
+  Weld, Curve, Displace and Simple Deform join the list, grouped as Generate,
+  Deform and Normals like Blender's own Add Modifier menu. Each one is named
+  as Blender names it ("Weighted Normal", not "WEIGHTED_NORMAL"), and an
+  object that can't take it gets a warning instead of a Python error.
+
+### Fixed
+- **`Shift+Q` ▸ Quick Mirror opens on hover** like every other entry; 2.8.1's
+  panel needed a click, and its tooltip showed a developer note. It is a
+  submenu again, of Mirror X / Y / Z (ticked where an axis is on) and Pivot
+  and Side choices, which are remembered for the next visit.
+
 ## [2.8.1]
 
 A fix for Quick Mirror in the `Shift+Q` menu.

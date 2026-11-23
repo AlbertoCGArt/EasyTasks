@@ -625,7 +625,22 @@ class ET_OT_AddModifier(bpy.types.Operator):
         return context.active_object is not None
 
     def execute(self, context):
-        context.active_object.modifiers.new(name=self.modifier_type, type=self.modifier_type)
+        obj = context.active_object
+        types = bpy.types.Modifier.bl_rna.properties['type'].enum_items
+        item = types.get(self.modifier_type)
+        if item is None:
+            self.report({'WARNING'}, f"Unknown modifier type {self.modifier_type}")
+            return {'CANCELLED'}
+        # Blender's own name ("Weighted Normal"), not the type code.
+        try:
+            mod = obj.modifiers.new(name=item.name, type=self.modifier_type)
+        except (TypeError, RuntimeError):
+            mod = None
+        if mod is None:
+            self.report({'WARNING'}, f"'{obj.name}' can't take a {item.name} modifier")
+            return {'CANCELLED'}
+        if hasattr(obj.modifiers, 'active'):
+            obj.modifiers.active = mod
         return {"FINISHED"}
 
 
@@ -1090,22 +1105,36 @@ def draw_quick_mirror(layout, context):
         op.side = side
 
 
-class ET_PT_QuickMirrorPopover(bpy.types.Panel):
-    """Quick Mirror as it opens from the Shift+Q menu. A popover rather than a
-    submenu: in a menu the Pivot and Side rows turned into menu entries spread
-    across the window, and picking one closed the menu before an axis could be
-    pressed."""
-    bl_idname      = "ET_PT_quick_mirror_popover"
+# Quick Mirror as it opens from the Shift+Q menu, built from plain menu
+# entries. draw_quick_mirror's button rows are for panels: in a menu Blender
+# spread them across the window. A popover kept the rows but only opened on
+# click, where every other entry opens on hover. Pivot and Side are submenus
+# that remember the choice, so the next visit mirrors with it.
+class ET_MT_QuickMirrorMenu(bpy.types.Menu):
+    bl_idname      = "ET_MT_quick_mirror_menu"
     bl_label       = "Quick Mirror"
-    bl_space_type  = 'VIEW_3D'
-    bl_region_type = 'HEADER'
-    bl_ui_units_x  = 15
+    bl_description = ("Mirror the selected part across the active object or the "
+                      "3D cursor")
 
     def draw(self, context):
         layout = self.layout
-        layout.label(text='Part first, then the object to mirror across',
-                     icon='INFO')
-        draw_quick_mirror(layout, context)
+        scene = context.scene
+        pivot, side = scene.et_mirror_pivot, scene.et_mirror_side
+        on = _mirror_axes_on(context, pivot) if context.mode == 'OBJECT' else {}
+        layout.label(text='Part first, then the object to mirror across')
+        for axis in _MIRROR_AXES:
+            op = layout.operator('et.quick_mirror', text=f'Mirror {axis}',
+                                 icon='CHECKBOX_HLT' if on.get(axis) else 'CHECKBOX_DEHLT')
+            op.axis = axis
+            op.pivot = pivot
+            op.side = side
+        layout.separator()
+        pivots = {k: (l, ic) for k, l, _d, ic in _MIRROR_PIVOTS}
+        sides  = {k: (l, ic) for k, l, _d, ic in _MIRROR_SIDES}
+        layout.prop_menu_enum(scene, 'et_mirror_pivot',
+                              text=f'Pivot: {pivots[pivot][0]}', icon=pivots[pivot][1])
+        layout.prop_menu_enum(scene, 'et_mirror_side',
+                              text=f'Side: {sides[side][0]}', icon=sides[side][1])
 
 
 # --- floating buttons in the 3D view ---------------------------------------
@@ -1439,6 +1468,31 @@ def _transform_apply_buttons(layout, texts):
         op.location, op.rotation, op.scale = flags
 
 
+_FAVOURITE_MODIFIERS = (
+    (   # generate
+        ('ARRAY',           'Array',               'MOD_ARRAY'),
+        ('BEVEL',           'Bevel',               'MOD_BEVEL'),
+        ('BOOLEAN',         'Boolean',             'MOD_BOOLEAN'),
+        ('DECIMATE',        'Decimate',            'MOD_DECIM'),
+        ('MIRROR',          'Mirror',              'MOD_MIRROR'),
+        ('SOLIDIFY',        'Solidify',            'MOD_SOLIDIFY'),
+        ('SUBSURF',         'Subdivision Surface', 'MOD_SUBSURF'),
+        ('TRIANGULATE',     'Triangulate',         'MOD_TRIANGULATE'),
+        ('WELD',            'Weld',                'AUTOMERGE_OFF'),
+    ),
+    (   # deform
+        ('CURVE',           'Curve',               'MOD_CURVE'),
+        ('DISPLACE',        'Displace',            'MOD_DISPLACE'),
+        ('SHRINKWRAP',      'Shrinkwrap',          'MOD_SHRINKWRAP'),
+        ('SIMPLE_DEFORM',   'Simple Deform',       'MOD_SIMPLEDEFORM'),
+    ),
+    (   # normals
+        ('EDGE_SPLIT',      'Edge Split',          'MOD_EDGESPLIT'),
+        ('WEIGHTED_NORMAL', 'Weighted Normal',     'MOD_NORMALEDIT'),
+    ),
+)
+
+
 class ET_MT_ModifiersMenu(bpy.types.Menu):
     bl_idname = "ET_MT_modifiers_menu"
     bl_label  = "Modifiers"
@@ -1447,19 +1501,13 @@ class ET_MT_ModifiersMenu(bpy.types.Menu):
         layout = self.layout
         layout.operator_context = "INVOKE_DEFAULT"
         layout.operator('object.modifier_add', text='Add Modifier', icon='MODIFIER')
-        layout.separator()
-        MODS = [
-            ('ARRAY',           'Array',               'MOD_ARRAY'),
-            ('BEVEL',           'Bevel',               'MOD_BEVEL'),
-            ('MIRROR',          'Mirror',              'MOD_MIRROR'),
-            ('EDGE_SPLIT',      'Edge Split',          'MOD_EDGESPLIT'),
-            ('SOLIDIFY',        'Solidify',            'MOD_SOLIDIFY'),
-            ('WEIGHTED_NORMAL', 'Weighted Normal',     'MOD_NORMALEDIT'),
-            ('SUBSURF',         'Subdivision Surface', 'MOD_SUBSURF'),
-            ('SHRINKWRAP',      'Shrinkwrap',          'MOD_SHRINKWRAP'),
-        ]
-        for mod_type, label, icon in MODS:
-            layout.operator('et.add_modifier', text=label, icon=icon).modifier_type = mod_type
+        # The ones environment and prop work reaches for, grouped as Blender's
+        # own Add Modifier menu groups them. Anything else is under Add Modifier.
+        for group in _FAVOURITE_MODIFIERS:
+            layout.separator()
+            for mod_type, label, icon in group:
+                layout.operator('et.add_modifier', text=label,
+                                icon=icon).modifier_type = mod_type
         layout.separator()
         layout.operator('et.clear_modifiers', text='Clear Modifiers', icon='X')
 
@@ -1482,7 +1530,7 @@ class ET_MT_FavToolsMenu(bpy.types.Menu):
         layout.separator()
 
         layout.menu('ET_MT_origin_menu',       text='Origin',       icon='OBJECT_ORIGIN')
-        layout.popover('ET_PT_quick_mirror_popover', text='Quick Mirror', icon='MOD_MIRROR')
+        layout.menu('ET_MT_quick_mirror_menu', text='Quick Mirror', icon='MOD_MIRROR')
         layout.menu('ET_MT_modifiers_menu',    text='Modifiers',    icon='MODIFIER')
         layout.operator('et.drop_it',          text='Drop It',          icon='TRIA_DOWN_BAR')
         layout.operator('et.smart_duplicate',  text='Smart Duplicate',  icon='DUPLICATE')
@@ -6556,7 +6604,7 @@ classes = (
     ET_OT_ClearModifiers,
     ET_OT_AddModifier,
     ET_OT_QuickMirror,
-    ET_PT_QuickMirrorPopover,
+    ET_MT_QuickMirrorMenu,
     ET_GGT_QuickMirror,
     ET_OT_BatchExport,
     ET_MT_InteractionModePie,
