@@ -2,7 +2,10 @@
 
 All notable changes to Easy Tasks are recorded here.
 
-## [Unreleased]
+## [2.8.3]
+
+Spread Out lays a kit or a building's parts out on the ground so you can see
+each piece, and Restore Layout puts them back.
 
 ### Added
 - **Spread Out** and **Restore Layout** (Model ▸ Object, and `Shift+Q`).
