@@ -6392,13 +6392,49 @@ def _co_point_feature(location, normal, size):
     return _CoFeature(location.copy(), n, list(zip(ring[:-1], ring[1:])), 'POINT')
 
 
-def _co_mate_delta(src, dst, spin, flip):
-    """World-space change that puts src (a world feature) on dst, facing it."""
-    want = dst.normal if flip else -dst.normal
-    turn = src.normal.rotation_difference(want).to_matrix().to_4x4()
-    twist = mathutils.Matrix.Rotation(spin, 4, dst.normal)
-    return (mathutils.Matrix.Translation(dst.center) @ twist @ turn
+def _co_mate_delta(src, dst, spin, flip, src_axis=None):
+    """
+    World-space change that puts src (a world feature) on dst, facing it.
+
+    The shortest turn between the two normals leaves a piece put on a wall
+    or a slope at whatever odd angle that turn happens to produce. With
+    src_axis (a world direction on the piece, across its face), the piece is
+    then squared up so that axis runs straight up the target surface. On a
+    floor or a ceiling "up the surface" means nothing, and the shortest turn
+    already keeps the piece's heading, so it is left alone.
+    """
+    n = dst.normal
+    want = n if flip else -n
+    turn = src.normal.rotation_difference(want).to_matrix()
+    square = mathutils.Matrix.Identity(3)
+    if src_axis is not None:
+        up = mathutils.Vector((0.0, 0.0, 1.0))
+        plane_up = up - n * up.dot(n)
+        a = turn @ src_axis
+        a = a - n * a.dot(n)
+        if plane_up.length > 0.2 and a.length > 1e-6:
+            a.normalize()
+            plane_up.normalize()
+            angle = np.arctan2(a.cross(plane_up).dot(n), a.dot(plane_up))
+            square = mathutils.Matrix.Rotation(float(angle), 3, n)
+    twist = mathutils.Matrix.Rotation(spin, 3, n)
+    rot = (twist @ square @ turn).to_4x4()
+    return (mathutils.Matrix.Translation(dst.center) @ rot
             @ mathutils.Matrix.Translation(-src.center))
+
+
+def _co_across_axis(matrix, normal):
+    """The piece's own axis (world) lying flattest across a face with this
+    normal: on a plate's underside, one of its edges' directions."""
+    axes = [matrix.col[i].to_3d() for i in range(3)]
+    axes = [a.normalized() for a in axes if a.length > 1e-9]
+    if not axes:
+        return None
+    return min(axes, key=lambda a: abs(a.dot(normal)))
+
+
+# Snap or free, remembered for the rest of the Blender session.
+_co_prefs = {"free": False}
 
 
 def _co_matrix_to_list(m):
@@ -6425,9 +6461,14 @@ class _CopyOntoSession:
         self.linked = linked
         self.tree = [source] + _spread_descendants(source)
         self.move = False
+        # Snap: meet the face or rim's centre. Free: meet the exact point
+        # under the mouse, flat against the surface there.
+        self.free = _co_prefs["free"]
         self.phase = 'FROM'
         self.spin = 0.0
         self.flip = False
+        self.src_axis = None
+        self._last_ray = None
         self.hover_feat = None   # world feature under the mouse
         self.from_feat = None    # world feature picked on the source
         self.delta = None        # world change for the ghost / placement
@@ -6478,6 +6519,11 @@ class _CopyOntoSession:
             if obj in skip:
                 start = loc + direction * 1e-4
                 continue
+            if self.free:
+                # Face the mouse even when the back of a face was hit.
+                if nor.dot(direction) > 0.0:
+                    nor = -nor
+                return _co_point_feature(loc, nor, self._free_size())
             if obj.type == 'MESH' and idx >= 0:
                 info = self._mesh_info(obj, dg)
                 if idx < len(info.lt):
@@ -6486,8 +6532,16 @@ class _CopyOntoSession:
             return _co_point_feature(loc, nor, max(obj.dimensions) * 0.05 or 0.05)
         return None
 
+    def _free_size(self):
+        """Radius of the ring drawn at a free placement: the picked face's."""
+        f = self.from_feat
+        if f is None or not f.outline:
+            return 0.05
+        return max(max((a - f.center).length for a, _b in f.outline), 0.01)
+
     # -- interaction ---------------------------------------------------------
     def hover(self, origin, direction):
+        self._last_ray = (origin.copy(), direction.copy())
         if self.phase == 'FROM':
             self.hover_feat = self._pick_source(origin, direction)
             self.delta = None
@@ -6499,9 +6553,17 @@ class _CopyOntoSession:
     def _update_delta(self):
         if self.phase == 'TO' and self.hover_feat is not None:
             self.delta = _co_mate_delta(self.from_feat, self.hover_feat,
-                                        self.spin, self.flip)
+                                        self.spin, self.flip, self.src_axis)
         else:
             self.delta = None
+
+    def toggle_free(self):
+        """Switch Snap / Free, remember it, and re-read what is under the
+        mouse under the new rule."""
+        self.free = not self.free
+        _co_prefs["free"] = self.free
+        if self._last_ray is not None:
+            self.hover(*self._last_ray)
 
     def spin_by(self, steps):
         self.spin += steps * self.SPIN_STEP
@@ -6522,6 +6584,8 @@ class _CopyOntoSession:
             if self.hover_feat is None:
                 return None
             self.from_feat = self.hover_feat
+            self.src_axis = _co_across_axis(self.source.matrix_world,
+                                            self.from_feat.normal)
             self.hover_feat = None
             self.phase = 'TO'
             return 'PICKED'
@@ -6780,15 +6844,18 @@ class ET_OT_CopyOnto(bpy.types.Operator):
     def _header(self, context):
         s = self._session
         verb = "Move" if s.move else "Copy"
+        mode = ("Free: on the surface under the mouse" if s.free
+                else "Snap: to centres of faces and rims")
         if s.phase == 'FROM':
             text = (f"{verb} Onto: click the face or rim to {verb.lower()} from"
                     f"   ·   M: {'copy' if s.move else 'move'} instead"
-                    f"   ·   Esc: cancel")
+                    f"   ·   Right-click / Esc: cancel")
         else:
-            text = ("Click where it goes   ·   Ctrl+Wheel: spin 15°"
-                    "   ·   F: flip   ·   "
-                    + ("" if s.move else "Shift+Click: place and keep going   ·   ")
-                    + "Right-click: pick again   ·   Esc: done")
+            text = (f"{mode}  (Tab)   ·   Click where it goes   ·   "
+                    "Ctrl+Wheel: spin 15°   ·   F: flip   ·   "
+                    + ("" if s.move else "Shift+Click: keep going   ·   ")
+                    + "Backspace: pick again   ·   Right-click / Esc: "
+                    + ("done" if s.placements else "cancel"))
         self._area.header_text_set(text)
         if context.workspace is not None:
             context.workspace.status_text_set(text)
@@ -6876,10 +6943,15 @@ class ET_OT_CopyOnto(bpy.types.Operator):
         elif kind == 'M' and not s.placements:
             s.move = not s.move
             self._header(context)
-        elif kind == 'RIGHTMOUSE' and s.phase == 'TO' and not s.placements:
+        elif kind == 'TAB':
+            s.toggle_free()
+            self._header(context)
+        elif kind == 'BACK_SPACE' and s.phase == 'TO' and not s.placements:
             s.back()
             self._header(context)
         elif kind in {'ESC', 'RIGHTMOUSE'}:
+            # Right-click cancels, as everywhere in Blender. Pieces already
+            # placed with Shift+click stay.
             return self._finish(context)
         return {'RUNNING_MODAL'}
 

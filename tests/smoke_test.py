@@ -3753,6 +3753,53 @@ check("copy onto interactive: open rims, and a run built onto its own copies",
       co_pipe_run_and_open_rims)
 
 
+def co_free_on_a_wall():
+    # A thin plate, and a big wall facing +X.
+    bpy.ops.mesh.primitive_cube_add(size=1, location=tuple(_P(5, 0, 1)))
+    plate = bpy.context.active_object
+    plate.name = "COI_Plate"
+    plate.scale = (1.0, 0.6, 0.05)
+    bpy.ops.mesh.primitive_plane_add(size=6, location=tuple(_P(0, 0, 3)),
+                                     rotation=(0, 1.5708, 0))
+    wall = bpy.context.active_object
+    wall.name = "COI_Wall"
+    bpy.context.view_layer.update()
+    saved = dict(et._co_prefs)
+    try:
+        s = _co_session(plate)
+        s.free = False
+        f = s.hover(_P(5.1, 0.1, -5), _Vec((0, 0, 1)))       # the plate's underside
+        assert f is not None and _near(f.center, _P(5, 0, 0.975)), f and f.center[:]
+        s.click()
+        # Snap: the wall's centre, wherever on it the mouse is.
+        t = s.hover(_P(5, 1.0, 3.5), _Vec((-1, 0, 0)))
+        assert _near(t.center, _P(0, 0, 3)), t.center[:]
+        # Tab: free, on the point under the mouse, and remembered.
+        s.toggle_free()
+        assert s.free and et._co_prefs["free"] is True
+        assert _near(s.hover_feat.center, _P(0, 1.0, 3.5)), s.hover_feat.center[:]
+        assert _near(s.hover_feat.normal, (1, 0, 0)), s.hover_feat.normal[:]
+        assert et._CopyOntoSession(bpy.context, plate).free, "Free not remembered"
+        assert s.click() == 'PLACED'
+        lo, hi = _co_bounds(s.copies[0])
+        size = hi - lo
+        # Flat against the wall, centred on the mouse point, and square: an
+        # edge straight up the wall, not a diamond. (3e-3: Blender 3.0 loses
+        # ~0.1 degree turning an exact 90-degree pitch back into Euler angles.)
+        assert abs(lo.x - _P(0, 0, 0).x) < 3e-3 and abs(size.x - 0.05) < 3e-3, (lo.x, size.x)
+        assert abs(size.z - 1.0) < 3e-3 and abs(size.y - 0.6) < 3e-3, f"not square: {size[:]}"
+        mid = (lo + hi) / 2
+        assert _near((mid.y, mid.z), (_P(0, 1.0, 3.5).y, _P(0, 1.0, 3.5).z)), mid[:]
+        _spread_cleanup(s.copies)
+    finally:
+        et._co_prefs.clear()
+        et._co_prefs.update(saved)
+        _spread_cleanup([plate, wall])
+
+check("copy onto interactive: free placement on a wall, squared up; Tab remembered",
+      co_free_on_a_wall)
+
+
 def co_replay_and_ghost():
     p = _co_pipe("COI_Replay", loc=tuple(_P(0, 0, 0)))
     ghost = et._co_ghost_triangles(bpy.context, [p])

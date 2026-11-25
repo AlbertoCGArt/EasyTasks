@@ -2,6 +2,25 @@
 
 All notable changes to Easy Tasks are recorded here.
 
+## [Unreleased]
+
+### Added
+- **Copy / Move Onto: Free placement.** `Tab` switches between **Snap**
+  (meet the centre of the face or rim under the mouse — right for pipes) and
+  **Free** (meet the exact point under the mouse, flat against the surface —
+  right for a plate on a wall, where Snap sent it to the middle of the whole
+  wall). The choice is remembered for the rest of the session and shown in
+  the header.
+
+### Changed
+- **Pieces put on walls and slopes come out square**, one of their edges
+  straight up the surface, instead of at whatever angle the shortest turn
+  gave (a plate went on a wall as a diamond). Floors and ceilings keep the
+  piece's heading as before. `Ctrl`+wheel still spins it.
+- **Right-click cancels** Copy / Move Onto, like `Esc` and like everywhere
+  else in Blender; it used to go back to picking the first face, which is
+  now `Backspace`.
+
 ## [2.8.5]
 
 Copy Onto by clicking: pick an end on the piece, see a see-through copy

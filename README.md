@@ -299,12 +299,16 @@ face and centre on centre. Click to place.
 
 | While placing | |
 | --- | --- |
+| `Tab` | **Snap** to the centre of the face or rim, or **Free**: the exact point under the mouse, flat on the surface. Remembered |
 | `Ctrl` + wheel | Spin 15° about the meeting point — to line up flange bolts |
 | `F` | Flip, so the piece points the other way |
 | `M` | Move the piece itself instead of copying it (before the first click) |
 | `Shift` + click | Place and keep going; new copies' ends are targets too |
-| Right-click | Pick the "from" face again |
-| `Esc` | Done |
+| `Backspace` | Pick the "from" face again |
+| Right-click / `Esc` | Cancel (pieces already placed with `Shift`+click stay) |
+
+On a wall or a slope the piece comes out square, one edge straight up the
+surface; on floors and ceilings it keeps its heading.
 
 The view orbits, pans and zooms as usual the whole time. Because it meets
 faces rather than origins, it works between pieces whose origins sit
