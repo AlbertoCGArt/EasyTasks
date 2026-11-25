@@ -29,7 +29,7 @@ Easy Tasks logo:
 | Panel | Holds |
 | --- | --- |
 | **Organize** | Assign to Category, and the collection tools (Project Structure, Arrange Scene, Color Sync, Isolate, Select, Swap, Rename, Visibility Bookmark) |
-| **Model** | Origin, Drop It, Smart Duplicate, Place Reference Image, Spread Out / Restore, normals and mesh cleanup, Quick Mirror |
+| **Model** | Origin, Drop It, Smart Duplicate, Copy Onto, Place Reference Image, Spread Out / Restore, normals and mesh cleanup, Quick Mirror |
 | **Materials** | Megascans Material, Blend Materials, Consolidate — plus Blend Mask when a blended material is active |
 | **Check** | Silhouette / Cavity / Face Stretch previews, UV Health, Stacked UVs, statistics |
 | **Export** | Batch Export, Generate LODs, Scene Snapshot |
@@ -289,6 +289,20 @@ collection), whether pieces sit on the ground, and whether the layout starts
 at the 3D cursor. **Restore Layout** puts everything back — still correctly
 after Batch Export has applied location — and with nothing selected it
 restores the whole scene.
+
+### Copy Onto
+Select the spots, then the piece to copy last, and click: a copy of the piece
+lands on every spot with that spot's position and rotation. A horizontal pipe
+dropped in exactly where a vertical one stands, or a light fitting on every
+ceiling marker at once — no duplicate, move, copy-location, copy-rotation.
+The piece's children come along with it.
+
+**Replace** deletes each spot (and whatever hangs under it) once its copy is
+in, which swaps a blockout placeholder or an old variant for the final asset.
+The redo panel also has **Match Scale**, **Linked** copies that share one
+mesh, and whether copies go in the piece's collection or each spot's, under
+the spot's parent. It matches origins and axes, so it is exact between copies
+of the same asset; pieces whose origins sit in different places land offset.
 
 ---
 

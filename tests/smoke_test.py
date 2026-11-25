@@ -3387,6 +3387,162 @@ check("restore layout: nothing spread is reported, not an error",
       restore_with_nothing_spread)
 
 
+# --- Copy Onto ----------------------------------------------------------------
+from mathutils import Euler as _Eu
+
+
+def _copy_onto_setup():
+    """A horizontal 'pipe' (the source) and two upright spots, rotated and
+    scaled differently, all in their own collections."""
+    src_coll = bpy.data.collections.new("CO_Kit")
+    spot_coll = bpy.data.collections.new("CO_Spots")
+    bpy.context.scene.collection.children.link(src_coll)
+    bpy.context.scene.collection.children.link(spot_coll)
+    source = _spread_cube("CO_PipeH", 1.0, (10, 0, 1), coll=src_coll)
+    source.scale = (1, 1, 4)
+    source.rotation_euler = (0, 1.5708, 0)
+    spots = []
+    for i, (loc, rot) in enumerate((((0, 0, 2), (0, 0, 0)),
+                                    ((3, 4, 2), (0.3, 0, 0.8)))):
+        s = _spread_cube(f"CO_Spot{i}", 1.0, loc, coll=spot_coll)
+        s.rotation_euler = rot
+        s.scale = (2, 2, 2)
+        spots.append(s)
+    bpy.context.view_layer.update()
+    return source, spots, src_coll, spot_coll
+
+
+def _copy_onto_teardown(colls):
+    for c in colls:
+        for o in list(c.all_objects):
+            bpy.data.objects.remove(o)
+        bpy.data.collections.remove(c)
+
+
+def _copy_onto_run(source, spots, **kw):
+    _spread_select(spots + [source], active=source)
+    before = set(bpy.data.objects)
+    res = bpy.ops.et.copy_onto(**kw)
+    bpy.context.view_layer.update()
+    return res, [o for o in bpy.data.objects if o not in before]
+
+
+def copy_onto_basic():
+    source, spots, *colls = _copy_onto_setup()
+    src_before = source.matrix_world.copy()
+    res, new = _copy_onto_run(source, spots)
+    assert res == {'FINISHED'}, res
+    assert len(new) == 2, [o.name for o in new]
+    for spot in spots:
+        loc, rot, _ = spot.matrix_world.decompose()
+        match = [o for o in new
+                 if (o.matrix_world.translation - loc).length < 1e-4]
+        assert len(match) == 1, f"no copy on {spot.name}"
+        c = match[0]
+        c_loc, c_rot, c_scale = c.matrix_world.decompose()
+        assert c_rot.rotation_difference(rot).angle < 1e-4, f"{c.name} rotation"
+        assert (c_scale - _Vec((1, 1, 4))).length < 1e-4, f"{c.name} took the spot's scale"
+        assert c.data is not source.data, "copy shares the mesh without Linked"
+        assert c.users_collection[0].name == "CO_Kit", "copy left the source's collection"
+        assert c.select_get(), "copies should end up selected"
+    assert _same_matrix(source.matrix_world, src_before), "source moved"
+    assert all(s.name in bpy.data.objects for s in spots), "spots deleted without Replace"
+    _copy_onto_teardown(colls)
+
+check("copy onto: a copy on each spot, with its position and rotation", copy_onto_basic)
+
+
+def copy_onto_options():
+    source, spots, *colls = _copy_onto_setup()
+    res, new = _copy_onto_run(source, spots, linked=True, match_scale=True)
+    assert res == {'FINISHED'}
+    for c in new:
+        assert c.data is source.data, "Linked copy got its own mesh"
+        scale = c.matrix_world.decompose()[2]
+        assert (scale - _Vec((2, 2, 2))).length < 1e-4, f"Match Scale gave {scale[:]}"
+    _copy_onto_teardown(colls)
+
+check("copy onto: linked and match scale", copy_onto_options)
+
+
+def copy_onto_brings_children():
+    source, spots, *colls = _copy_onto_setup()
+    flange = _spread_cube("CO_Flange", 0.3, (10, 0, 3), coll=colls[0])
+    flange.parent = source
+    flange.matrix_parent_inverse = source.matrix_world.inverted()
+    source[et._SPREAD_KEY] = [1.0, 0.0, 0.0]
+    bpy.context.view_layer.update()
+    rel = source.matrix_world.inverted() @ flange.matrix_world
+    # Selecting the source's own child too must not make it a spot.
+    _spread_select(spots + [flange, source], active=source)
+    before = set(bpy.data.objects)
+    assert bpy.ops.et.copy_onto() == {'FINISHED'}
+    bpy.context.view_layer.update()
+    new = [o for o in bpy.data.objects if o not in before]
+    assert len(new) == 4, f"expected 2 pipes + 2 flanges, got {[o.name for o in new]}"
+    tops = [o for o in new if o.parent is None]
+    assert len(tops) == 2
+    for top in tops:
+        assert et._SPREAD_KEY not in top, "copy inherited the spread offset"
+        kids = list(top.children)
+        assert len(kids) == 1, [k.name for k in kids]
+        assert _same_matrix(top.matrix_world.inverted() @ kids[0].matrix_world, rel)
+    del source[et._SPREAD_KEY]
+    _copy_onto_teardown(colls)
+
+check("copy onto: the source's children come along", copy_onto_brings_children)
+
+
+def copy_onto_replace_into_target():
+    source, spots, *colls = _copy_onto_setup()
+    group = bpy.data.objects.new("CO_Group", None)
+    colls[1].objects.link(group)
+    group.location = (1, 1, 0)
+    group.rotation_euler = (0, 0, 0.5)
+    for s in spots:
+        world = s.matrix_world.copy()
+        s.parent = group
+        s.matrix_world = world
+    bolt = _spread_cube("CO_OldBolt", 0.1, (0, 0, 3), coll=colls[1])
+    bolt.parent = spots[0]
+    bpy.context.view_layer.update()
+    spot_worlds = [s.matrix_world.copy() for s in spots]
+    names = [s.name for s in spots] + [bolt.name]
+    res, _new = _copy_onto_run(source, spots, replace=True, place_in='TARGET')
+    assert res == {'FINISHED'}
+    for n in names:
+        assert n not in bpy.data.objects, f"{n} survived Replace"
+    placed = [o for o in group.children]
+    assert len(placed) == 2, f"copies not under the spot's parent: {[o.name for o in placed]}"
+    for c in placed:
+        assert c.users_collection[0] == colls[1], "copy not in the spot's collection"
+        loc = c.matrix_world.translation
+        assert any((loc - w.translation).length < 1e-4 for w in spot_worlds), loc[:]
+    assert source.name in bpy.data.objects
+    _copy_onto_teardown(colls)
+
+check("copy onto: replace, into the spot's collection and parent",
+      copy_onto_replace_into_target)
+
+
+def copy_onto_needs_a_spot():
+    source, spots, *colls = _copy_onto_setup()
+    kid = _spread_cube("CO_Kid", 0.2, coll=colls[0])
+    kid.parent = source
+    _spread_select([kid, source], active=source)
+    assert bpy.ops.et.copy_onto() == {'CANCELLED'}
+    # A spot the source hangs under is kept even with Replace.
+    source.parent = spots[0]
+    res, new = _copy_onto_run(source, [spots[0], spots[1]], replace=True)
+    assert res == {'FINISHED'}
+    assert spots[0].name in bpy.data.objects, "deleted the source's own parent"
+    assert source.name in bpy.data.objects
+    _copy_onto_teardown(colls)
+
+check("copy onto: only the source selected is refused; its parent is never replaced",
+      copy_onto_needs_a_spot)
+
+
 # --- unregister ------------------------------------------------------------
 check("unregister()", et.unregister)
 

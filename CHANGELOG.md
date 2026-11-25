@@ -2,6 +2,18 @@
 
 All notable changes to Easy Tasks are recorded here.
 
+## [Unreleased]
+
+### Added
+- **Copy Onto** (Model ▸ Object, and `Shift+Q`). Select the spots, then the
+  piece to copy last: a copy lands on every spot with its position and
+  rotation, so a horizontal pipe can be dropped in exactly where a vertical
+  one stands, or on ten spots at once. The piece's children come along. The
+  redo panel adds Match Scale, Linked copies, **Replace** (delete each spot
+  and what hangs under it, for swapping a placeholder or an old variant for
+  the final asset) and whether copies go in the piece's collection or each
+  spot's, under its parent.
+
 ## [2.8.3]
 
 Spread Out lays a kit or a building's parts out on the ground so you can see

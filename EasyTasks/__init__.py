@@ -1534,6 +1534,7 @@ class ET_MT_FavToolsMenu(bpy.types.Menu):
         layout.menu('ET_MT_modifiers_menu',    text='Modifiers',    icon='MODIFIER')
         layout.operator('et.drop_it',          text='Drop It',          icon='TRIA_DOWN_BAR')
         layout.operator('et.smart_duplicate',  text='Smart Duplicate',  icon='DUPLICATE')
+        layout.operator('et.copy_onto',        text='Copy Onto',        icon='PASTEDOWN')
         layout.operator('et.spread_out',       text='Spread Out',       icon='MESH_GRID')
         layout.operator('et.restore_layout',   text='Restore Layout',   icon='LOOP_BACK')
         layout.operator('et.wnormals_bevel',   text='WNormals + Bevel', icon='MOD_NORMALEDIT')
@@ -5396,6 +5397,15 @@ def _spread_targets(context):
     return [o for o in sel if not under_picked(o)]
 
 
+def _spread_ancestors(obj):
+    """obj's parent, grandparent and so on up to the top."""
+    out, p = [], obj.parent
+    while p is not None:
+        out.append(p)
+        p = p.parent
+    return out
+
+
 def _spread_world_to_local(obj, delta):
     """The location change that moves obj by delta in world space. Location
     lives in parent space, which a rotated or scaled parent turns around."""
@@ -6081,6 +6091,179 @@ class ET_OT_SmartDuplicate(bpy.types.Operator):
         return {"FINISHED"}
 
 
+# ---------------------------------------------------------------------------
+# Copy Onto
+# ---------------------------------------------------------------------------
+# The active object is the piece to copy; every other selected object is a spot
+# to put a copy. Each copy takes its spot's position and rotation: a vertical
+# pipe gets a copy of the horizontal one standing exactly where it stands.
+# Copies are made at the data level rather than through object.duplicate, so
+# nothing depends on what else happens to be selected, and the source's
+# children come along as part of the piece.
+
+def _copy_onto_matrix(source, target, match_scale):
+    """target's location and rotation, with target's or source's scale."""
+    loc, rot, t_scale = target.matrix_world.decompose()
+    scale = t_scale if match_scale else source.matrix_world.decompose()[2]
+    return (mathutils.Matrix.Translation(loc)
+            @ rot.to_matrix().to_4x4()
+            @ mathutils.Matrix.Diagonal(scale).to_4x4())
+
+
+def _link_into(obj, collections, scene):
+    """Link obj into every one of collections that accepts it, falling back to
+    the scene collection if none does (a linked collection refuses new
+    objects)."""
+    linked = 0
+    for coll in collections:
+        try:
+            coll.objects.link(obj)
+            linked += 1
+        except RuntimeError:
+            pass
+    if not linked:
+        scene.collection.objects.link(obj)
+
+
+def _copy_hierarchy(src, linked, collections_for, scene):
+    """Copy src and everything parented under it; children keep their exact
+    relation to their parent. Returns the copy of src."""
+    def dup(o):
+        new = o.copy()
+        if not linked and o.data is not None:
+            new.data = o.data.copy()
+        # A spread-out source would hand its way home to the copy, and
+        # Restore Layout would then walk the copy off its spot.
+        if _SPREAD_KEY in new:
+            del new[_SPREAD_KEY]
+        _link_into(new, collections_for(o), scene)
+        return new
+
+    top = dup(src)
+    stack = [(src, top)]
+    while stack:
+        old, new = stack.pop()
+        for child in old.children:
+            child_copy = dup(child)
+            # copy() pointed it at the old parent. Assigning .parent resets
+            # the parent inverse to identity, so put the original's back:
+            # with it and the local transform, the relation is unchanged.
+            child_copy.parent = new
+            child_copy.matrix_parent_inverse = child.matrix_parent_inverse.copy()
+            stack.append((child, child_copy))
+    return top
+
+
+class ET_OT_CopyOnto(bpy.types.Operator):
+    bl_idname  = "et.copy_onto"
+    bl_label   = "Copy Onto"
+    bl_description = (
+        "Put a copy of the active object on each other selected object, with "
+        "its position and rotation. Select the spots, then the piece to copy last"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    match_scale: bpy.props.BoolProperty(
+        name="Match Scale", default=False,
+        description="Give each copy its spot's scale too; off keeps the "
+                    "copied piece's own size")
+    linked: bpy.props.BoolProperty(
+        name="Linked", default=False,
+        description="Copies share the source's mesh instead of each getting "
+                    "their own, like Alt+D")
+    replace: bpy.props.BoolProperty(
+        name="Replace", default=False,
+        description="Delete each spot, and everything parented under it, "
+                    "once its copy is in place")
+    place_in: bpy.props.EnumProperty(
+        name="Put In",
+        items=(('SOURCE', "Source's Collection",
+                "Copies go where the copied piece lives, under the same parent"),
+               ('TARGET', "Spot's Collection",
+                "Copies go where each spot lives, under the spot's parent")),
+        default='SOURCE')
+
+    @classmethod
+    def poll(cls, context):
+        active = context.active_object
+        return (context.mode == 'OBJECT' and active is not None
+                and any(o is not active for o in context.selected_objects))
+
+    def execute(self, context):
+        scene  = context.scene
+        source = context.active_object
+        context.view_layer.update()
+
+        source_tree = {source, *_spread_descendants(source)}
+        # Selecting the source together with its own children must not turn
+        # those children into spots.
+        targets = [o for o in context.selected_objects if o not in source_tree]
+        if not targets:
+            self.report({'WARNING'},
+                        "Select the spots, then the piece to copy last")
+            return {'CANCELLED'}
+
+        copies = []
+        for target in targets:
+            if self.place_in == 'TARGET':
+                def collections_for(_o, t=target):
+                    return t.users_collection
+                parent = target.parent
+            else:
+                def collections_for(o):
+                    return o.users_collection
+                parent = source.parent
+            top = _copy_hierarchy(source, self.linked, collections_for, scene)
+            top.parent = parent
+            top.matrix_parent_inverse = mathutils.Matrix.Identity(4)
+            top.matrix_world = _copy_onto_matrix(source, target, self.match_scale)
+            copies.append(top)
+
+        replaced = kept = 0
+        if self.replace:
+            above_source = set(_spread_ancestors(source))
+            doomed = set()
+            for target in targets:
+                if target in above_source:
+                    kept += 1          # deleting it would take the source too
+                    continue
+                doomed.add(target)
+                doomed.update(_spread_descendants(target))
+            # A copy put under a spot's parent can sit beneath another spot.
+            for top in copies:
+                doomed.discard(top)
+                doomed.difference_update(_spread_descendants(top))
+            doomed -= source_tree
+            context.view_layer.update()
+            # Anything left behind that hangs off a doomed object (a copy put
+            # under the spot's parent, say) keeps its place in the world.
+            for o in list(scene.objects):
+                if o not in doomed and o.parent in doomed:
+                    world = o.matrix_world.copy()
+                    o.parent = None
+                    o.matrix_world = world
+            for o in doomed:
+                if o in targets:
+                    replaced += 1
+                bpy.data.objects.remove(o)
+
+        for o in list(context.selected_objects):
+            o.select_set(False)
+        for top in copies:
+            top.select_set(True)
+        context.view_layer.objects.active = copies[0]
+
+        message = f"Placed {len(copies)} cop{'y' if len(copies) == 1 else 'ies'} of {source.name}"
+        if replaced:
+            message += f", replacing {replaced}"
+        if kept:
+            self.report({'WARNING'}, f"{message}; kept {kept} spot(s) the "
+                                     f"copied piece is parented under")
+        else:
+            self.report({'INFO'}, message)
+        return {'FINISHED'}
+
+
 class ET_OT_StackedUVDetector(bpy.types.Operator):
     bl_idname  = "et.stacked_uv_detector"
     bl_label   = "Stacked UV Detector"
@@ -6432,6 +6615,7 @@ class ET_PT_ModelPanel(bpy.types.Panel):
         col = _section(layout, "Object")
         col.operator('et.drop_it',               text='Drop It',               icon='TRIA_DOWN_BAR')
         col.operator('et.smart_duplicate',       text='Smart Duplicate',       icon='DUPLICATE')
+        col.operator('et.copy_onto',             text='Copy Onto',             icon='PASTEDOWN')
         col.operator('et.place_reference_image', text='Place Reference Image', icon='IMAGE_REFERENCE')
         row = col.row(align=True)
         row.operator('et.spread_out',     text='Spread Out', icon='MESH_GRID')
@@ -6887,6 +7071,7 @@ classes = (
     ET_OT_CavityPreview,
     ET_OT_FaceStretchAnalyzer,
     ET_OT_SmartDuplicate,
+    ET_OT_CopyOnto,
     ET_OT_StackedUVDetector,
     ET_OT_UVHealth,
     # Menus / pie
