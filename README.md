@@ -29,7 +29,7 @@ Easy Tasks logo:
 | Panel | Holds |
 | --- | --- |
 | **Organize** | Assign to Category, and the collection tools (Project Structure, Arrange Scene, Color Sync, Isolate, Select, Swap, Rename, Visibility Bookmark) |
-| **Model** | Origin, Drop It, Smart Duplicate, Place Reference Image, normals and mesh cleanup, Quick Mirror |
+| **Model** | Origin, Drop It, Smart Duplicate, Place Reference Image, Spread Out / Restore, normals and mesh cleanup, Quick Mirror |
 | **Materials** | Megascans Material, Blend Materials, Consolidate — plus Blend Mask when a blended material is active |
 | **Check** | Silhouette / Cavity / Face Stretch previews, UV Health, Stacked UVs, statistics |
 | **Export** | Batch Export, Generate LODs, Scene Snapshot |
@@ -275,6 +275,20 @@ later — useful when a scene has several working configurations.
 ### Collection Color Sync
 Pushes each collection's colour tag onto its objects' viewport colour, walking
 the tree so nested collections inherit and a child's own tag wins.
+
+### Spread Out and Restore Layout
+Lays the selection out on the ground in rows, biggest first, so every piece
+can be looked at on its own — a kit that imported stacked at the origin, the
+parts of a building, LODs side by side. Select one parent empty and its
+children are spread while the empty stays put; select several objects and
+each moves with whatever is parented under it. Collection instances take up
+the room of what they instance, and modifiers count.
+
+The redo panel sets the gap, the order, **Row per Collection** (one block per
+collection), whether pieces sit on the ground, and whether the layout starts
+at the 3D cursor. **Restore Layout** puts everything back — still correctly
+after Batch Export has applied location — and with nothing selected it
+restores the whole scene.
 
 ---
 

@@ -2,6 +2,20 @@
 
 All notable changes to Easy Tasks are recorded here.
 
+## [Unreleased]
+
+### Added
+- **Spread Out** and **Restore Layout** (Model ▸ Object, and `Shift+Q`).
+  Spread Out lays the selection out on the ground in rows so each piece can
+  be seen on its own: a kit that imported stacked at the origin, a
+  building's parts, LODs side by side. With one parent empty selected, its
+  children are spread and the empty stays put. Gap, order (biggest first or
+  by name), one block per collection, sitting on the ground and starting at
+  the 3D cursor are all in the redo panel. Collection instances are measured
+  by what they instance, and modifiers count. **Restore Layout** puts
+  everything back, including after Batch Export has applied location; with
+  nothing selected it restores the whole scene.
+
 ## [2.8.2]
 
 Quick Mirror opens on hover in the `Shift+Q` menu, and the Modifiers list

@@ -1534,6 +1534,8 @@ class ET_MT_FavToolsMenu(bpy.types.Menu):
         layout.menu('ET_MT_modifiers_menu',    text='Modifiers',    icon='MODIFIER')
         layout.operator('et.drop_it',          text='Drop It',          icon='TRIA_DOWN_BAR')
         layout.operator('et.smart_duplicate',  text='Smart Duplicate',  icon='DUPLICATE')
+        layout.operator('et.spread_out',       text='Spread Out',       icon='MESH_GRID')
+        layout.operator('et.restore_layout',   text='Restore Layout',   icon='LOOP_BACK')
         layout.operator('et.wnormals_bevel',   text='WNormals + Bevel', icon='MOD_NORMALEDIT')
         layout.operator('et.correct_normals',  text='Correct Normals',  icon='NORMALS_FACE')
         layout.operator('et.clean_up_mesh',    text='Clean Up Mesh',    icon='AUTOMERGE_ON')
@@ -5309,6 +5311,242 @@ class ET_OT_DropIt(bpy.types.Operator):
         return {"FINISHED"}
 
 
+# ---------------------------------------------------------------------------
+# Spread Out / Restore Layout
+# ---------------------------------------------------------------------------
+# Lays the selection out on the ground in rows so every piece can be seen on
+# its own: an imported kit that arrived stacked at the origin, a building's
+# parts, LODs side by side. Restore Layout puts them back.
+#
+# Each moved object remembers how far it was moved, as a location offset in its
+# own parent space, rather than where it used to be. Undoing an offset is right
+# even after Batch Export applies location (the offset is then in the mesh, and
+# taking it back off the location still lands the geometry where it started),
+# and a piece nudged after spreading keeps the nudge when it goes home.
+
+_SPREAD_KEY = '_et_spread'
+
+# Object types whose bound_box describes real geometry. An empty's is a unit
+# box that would make a bare empty look a metre wide.
+_SPREAD_BOUNDED = {'MESH', 'CURVE', 'SURFACE', 'META', 'FONT', 'LATTICE',
+                   'ARMATURE', 'GPENCIL', 'GREASEPENCIL', 'CURVES',
+                   'POINTCLOUD', 'VOLUME'}
+
+
+def _spread_descendants(obj):
+    """Every object parented under obj, at any depth. Object.children_recursive
+    is 3.1+, and bl_info promises 3.0."""
+    out, stack = [], list(obj.children)
+    while stack:
+        child = stack.pop()
+        out.append(child)
+        stack.extend(child.children)
+    return out
+
+
+def _spread_bound_points(obj, matrix, depth, out):
+    """World corners of obj's own geometry and, for a collection instance, of
+    everything it instances, nested instances included (to a sane depth)."""
+    if obj.type in _SPREAD_BOUNDED:
+        out.extend(matrix @ mathutils.Vector(c) for c in obj.bound_box)
+    coll = (obj.instance_collection
+            if obj.instance_type == 'COLLECTION' else None)
+    if coll is not None and depth < 8:
+        base = matrix @ mathutils.Matrix.Translation(-coll.instance_offset)
+        for inner in coll.all_objects:
+            _spread_bound_points(inner, base @ inner.matrix_world, depth + 1, out)
+
+
+def _spread_bounds(obj):
+    """World (min, max) of obj and everything that moves with it. Something
+    with no geometry at all counts as a point at its origin."""
+    pts = []
+    for o in [obj] + _spread_descendants(obj):
+        _spread_bound_points(o, o.matrix_world, 0, pts)
+    if not pts:
+        p = obj.matrix_world.translation
+        return p.copy(), p.copy()
+    lo = mathutils.Vector((min(p.x for p in pts), min(p.y for p in pts),
+                           min(p.z for p in pts)))
+    hi = mathutils.Vector((max(p.x for p in pts), max(p.y for p in pts),
+                           max(p.z for p in pts)))
+    return lo, hi
+
+
+def _spread_targets(context):
+    """
+    What Spread Out moves. One selected empty with children means "show me
+    its parts", so its children move and the empty stays put. Otherwise every
+    selected object moves, except one whose ancestor is also selected: it rides
+    along with that ancestor, and moving it as well would move it twice.
+    """
+    sel = list(context.selected_objects)
+    if len(sel) == 1 and sel[0].type == 'EMPTY' and sel[0].children:
+        return list(sel[0].children)
+    picked = set(sel)
+
+    def under_picked(o):
+        p = o.parent
+        while p is not None:
+            if p in picked:
+                return True
+            p = p.parent
+        return False
+
+    return [o for o in sel if not under_picked(o)]
+
+
+def _spread_world_to_local(obj, delta):
+    """The location change that moves obj by delta in world space. Location
+    lives in parent space, which a rotated or scaled parent turns around."""
+    parent_space = obj.matrix_world @ obj.matrix_basis.inverted_safe()
+    return parent_space.to_3x3().inverted_safe() @ delta
+
+
+def _shelf_pack(items, gap):
+    """
+    Place (obj, lo, size) items in rows about as wide as the whole set is
+    deep, so the result is roughly square. Returns ([(item, x, y)], depth).
+    """
+    area  = sum((s.x + gap) * (s.y + gap) for _o, _lo, s in items)
+    width = max((area ** 0.5), max(s.x for _o, _lo, s in items))
+    placed = []
+    x = y = row_depth = 0.0
+    for item in items:
+        size = item[2]
+        if x > 0.0 and x + size.x > width:
+            x = 0.0
+            y += row_depth + gap
+            row_depth = 0.0
+        placed.append((item, x, y))
+        x += size.x + gap
+        row_depth = max(row_depth, size.y)
+    return placed, y + row_depth
+
+
+class ET_OT_SpreadOut(bpy.types.Operator):
+    bl_idname  = "et.spread_out"
+    bl_label   = "Spread Out"
+    bl_description = (
+        "Lay the selection out on the ground in rows so each piece can be seen "
+        "on its own. With one parent empty selected, its children are spread. "
+        "Restore Layout puts them back"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    gap: bpy.props.FloatProperty(
+        name="Gap", default=0.5, min=0.0, soft_max=10.0, subtype='DISTANCE',
+        description="Space left between neighbouring pieces")
+    sort_by: bpy.props.EnumProperty(
+        name="Order",
+        items=(('SIZE', "Biggest First", "Largest footprint first"),
+               ('NAME', "By Name", "Alphabetical by object name")),
+        default='SIZE')
+    by_collection: bpy.props.BoolProperty(
+        name="Row per Collection", default=False,
+        description="Keep each collection's pieces together, one block per "
+                    "collection, in collection-name order")
+    on_ground: bpy.props.BoolProperty(
+        name="Sit on Ground", default=True,
+        description="Rest every piece on the ground; off keeps each piece's height")
+    at_cursor: bpy.props.BoolProperty(
+        name="Start at 3D Cursor", default=False,
+        description="Start the layout at the 3D cursor instead of the world origin")
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and bool(context.selected_objects)
+
+    def execute(self, context):
+        context.view_layer.update()
+        targets = _spread_targets(context)
+        # Linked objects cannot be moved from this file.
+        movable = [o for o in targets if o.library is None]
+        skipped = len(targets) - len(movable)
+        if not movable:
+            self.report({'WARNING'}, "Nothing here can be moved (linked data)")
+            return {'CANCELLED'}
+
+        items = []
+        for o in movable:
+            lo, hi = _spread_bounds(o)
+            items.append((o, lo, hi - lo))
+        if self.sort_by == 'NAME':
+            items.sort(key=lambda it: it[0].name)
+        else:
+            items.sort(key=lambda it: (-(it[2].x * it[2].y), it[0].name))
+
+        if self.by_collection:
+            groups = {}
+            for it in items:
+                colls = it[0].users_collection
+                groups.setdefault(colls[0].name if colls else "", []).append(it)
+            blocks = [groups[k] for k in sorted(groups)]
+        else:
+            blocks = [items]
+
+        start = (context.scene.cursor.location.copy() if self.at_cursor
+                 else mathutils.Vector((0.0, 0.0, 0.0)))
+        y0 = 0.0
+        for block in blocks:
+            placed, depth = _shelf_pack(block, self.gap)
+            for (o, lo, _size), x, y in placed:
+                dest = start + mathutils.Vector((x, y0 + y, 0.0))
+                delta = mathutils.Vector((dest.x - lo.x, dest.y - lo.y,
+                                          dest.z - lo.z if self.on_ground else 0.0))
+                local = _spread_world_to_local(o, delta)
+                o.location += local
+                before = mathutils.Vector(o.get(_SPREAD_KEY, (0.0, 0.0, 0.0)))
+                o[_SPREAD_KEY] = list(before + local)
+            # Blocks sit further apart than pieces, so they read as groups.
+            y0 += depth + self.gap * 3.0
+
+        message = f"Spread {len(movable)} object(s)"
+        if len(blocks) > 1:
+            message += f" in {len(blocks)} collection blocks"
+        if skipped:
+            self.report({'WARNING'},
+                        f"{message}, {skipped} linked one(s) left in place")
+        else:
+            self.report({'INFO'}, message + " — Restore Layout puts them back")
+        return {'FINISHED'}
+
+
+class ET_OT_RestoreLayout(bpy.types.Operator):
+    bl_idname  = "et.restore_layout"
+    bl_label   = "Restore Layout"
+    bl_description = (
+        "Put spread-out objects back where they were. Works on the selection "
+        "and everything under it, or on the whole scene when nothing selected "
+        "was spread"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT'
+
+    def execute(self, context):
+        pool = set()
+        for o in context.selected_objects:
+            pool.add(o)
+            pool.update(_spread_descendants(o))
+        spread = [o for o in pool if _SPREAD_KEY in o]
+        if not spread:
+            spread = [o for o in context.scene.objects if _SPREAD_KEY in o]
+        if not spread:
+            self.report({'INFO'}, "Nothing has been spread out")
+            return {'CANCELLED'}
+
+        for o in spread:
+            # Offsets are in each object's own parent space, so the order
+            # parents and children go back in does not matter.
+            o.location -= mathutils.Vector(o[_SPREAD_KEY])
+            del o[_SPREAD_KEY]
+        self.report({'INFO'}, f"Restored {len(spread)} object(s)")
+        return {'FINISHED'}
+
+
 class ET_OT_SelectByType(bpy.types.Operator):
     bl_idname  = "et.select_by_type"
     bl_label   = "Select by Type"
@@ -6195,6 +6433,9 @@ class ET_PT_ModelPanel(bpy.types.Panel):
         col.operator('et.drop_it',               text='Drop It',               icon='TRIA_DOWN_BAR')
         col.operator('et.smart_duplicate',       text='Smart Duplicate',       icon='DUPLICATE')
         col.operator('et.place_reference_image', text='Place Reference Image', icon='IMAGE_REFERENCE')
+        row = col.row(align=True)
+        row.operator('et.spread_out',     text='Spread Out', icon='MESH_GRID')
+        row.operator('et.restore_layout', text='Restore',    icon='LOOP_BACK')
 
         col = _section(layout, "Mesh")
         col.operator('et.wnormals_bevel',  text='WNormals + Bevel', icon='MOD_NORMALEDIT')
@@ -6635,6 +6876,8 @@ classes = (
     ET_OT_PlaceReferenceImage,
     ET_OT_SceneSnapshot,
     ET_OT_DropIt,
+    ET_OT_SpreadOut,
+    ET_OT_RestoreLayout,
     ET_OT_SelectByType,
     ET_OT_WNormalsBevel,
     ET_OT_CorrectNormals,

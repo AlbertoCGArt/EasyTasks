@@ -3186,6 +3186,207 @@ def ui_optional_additions():
 check("UI: header bar opt-in, modifier buttons opt-out", ui_optional_additions)
 
 
+# --- Spread Out / Restore Layout --------------------------------------------
+from mathutils import Matrix as _Mx, Vector as _Vec
+
+
+def _spread_cube(name, size, loc=(0, 0, 0), coll=None):
+    mesh = bpy.data.meshes.new(name)
+    h = size / 2.0
+    verts = [(x, y, z) for x in (-h, h) for y in (-h, h) for z in (-h, h)]
+    faces = [(0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1),
+             (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3)]
+    mesh.from_pydata(verts, [], faces)
+    ob = bpy.data.objects.new(name, mesh)
+    (coll or bpy.context.scene.collection).objects.link(ob)
+    ob.location = loc
+    return ob
+
+
+def _spread_select(objs, active=None):
+    for o in list(bpy.context.selected_objects):
+        o.select_set(False)
+    for o in objs:
+        o.select_set(True)
+    bpy.context.view_layer.objects.active = active or (objs[0] if objs else None)
+    bpy.context.view_layer.update()
+
+
+def _spread_footprints(objs):
+    bpy.context.view_layer.update()
+    return {o.name: et._spread_bounds(o) for o in objs}
+
+
+def _spread_no_overlap(objs, eps=1e-4):
+    boxes = list(_spread_footprints(objs).items())
+    for i, (na, (la, ha)) in enumerate(boxes):
+        for nb, (lb, hb) in boxes[i + 1:]:
+            apart = (ha.x <= lb.x + eps or hb.x <= la.x + eps or
+                     ha.y <= lb.y + eps or hb.y <= la.y + eps)
+            assert apart, f"{na} overlaps {nb}: {la[:]}-{ha[:]} vs {lb[:]}-{hb[:]}"
+
+
+def _spread_cleanup(objs):
+    for o in objs:
+        if o.name in bpy.data.objects:
+            bpy.data.objects.remove(o)
+
+
+def _same_matrix(a, b, eps=1e-4):
+    return all(abs(a[i][j] - b[i][j]) < eps for i in range(4) for j in range(4))
+
+
+def spread_and_restore():
+    objs = [_spread_cube(f"SP_{i}", s, (0.1 * i, 0, 2))
+            for i, s in enumerate((3.0, 1.0, 2.0, 0.5))]
+    bpy.context.view_layer.update()   # matrix_world is stale until evaluated
+    before = {o.name: o.matrix_world.copy() for o in objs}
+    _spread_select(objs)
+    assert bpy.ops.et.spread_out(gap=0.25) == {'FINISHED'}
+    _spread_no_overlap(objs)
+    for name, (lo, _hi) in _spread_footprints(objs).items():
+        assert abs(lo.z) < 1e-4, f"{name} not on the ground: z={lo.z}"
+    assert all(et._SPREAD_KEY in o for o in objs)
+    # Spreading again keeps the way home pointing at the true original.
+    assert bpy.ops.et.spread_out(gap=1.0, sort_by='NAME') == {'FINISHED'}
+    _spread_no_overlap(objs)
+    assert bpy.ops.et.restore_layout() == {'FINISHED'}
+    bpy.context.view_layer.update()
+    for o in objs:
+        assert _same_matrix(o.matrix_world, before[o.name]), o.name
+        assert et._SPREAD_KEY not in o, "restore left the offset behind"
+    _spread_cleanup(objs)
+
+check("spread out: no overlaps, on ground, restore is exact", spread_and_restore)
+
+
+def spread_parent_empty_children():
+    empty = bpy.data.objects.new("SP_Building", None)
+    bpy.context.scene.collection.objects.link(empty)
+    # A rotated, scaled parent: offsets must land in the right parent space.
+    empty.location = (5, 5, 1)
+    empty.rotation_euler = (0, 0, 1.2)
+    empty.scale = (2, 2, 2)
+    kids = [_spread_cube(f"SP_Part_{i}", 1.0) for i in range(3)]
+    for k in kids:
+        k.parent = empty
+    bpy.context.view_layer.update()
+    empty_before = empty.matrix_world.copy()
+    kids_before = {k.name: k.matrix_world.copy() for k in kids}
+    _spread_select([empty])
+    assert bpy.ops.et.spread_out(gap=0.5) == {'FINISHED'}
+    bpy.context.view_layer.update()
+    assert _same_matrix(empty.matrix_world, empty_before), "the empty itself moved"
+    _spread_no_overlap(kids)
+    for name, (lo, _hi) in _spread_footprints(kids).items():
+        assert abs(lo.z) < 1e-4, f"{name} z={lo.z}"
+        assert abs(lo.x) < 30 and abs(lo.y) < 30, f"{name} flew off: {lo[:]}"
+    # Selecting the parent restores what is under it.
+    _spread_select([empty])
+    assert bpy.ops.et.restore_layout() == {'FINISHED'}
+    bpy.context.view_layer.update()
+    for k in kids:
+        assert _same_matrix(k.matrix_world, kids_before[k.name]), k.name
+    _spread_cleanup(kids + [empty])
+
+check("spread out: one parent empty spreads its children (rotated parent)",
+      spread_parent_empty_children)
+
+
+def spread_collection_instance_has_size():
+    src = bpy.data.collections.new("SP_Kit")
+    big = _spread_cube("SP_KitBig", 4.0, coll=src)
+    inst = bpy.data.objects.new("SP_KitInstance", None)
+    inst.instance_type = 'COLLECTION'
+    inst.instance_collection = src
+    bpy.context.scene.collection.objects.link(inst)
+    small = _spread_cube("SP_Small", 1.0)
+    lo, hi = et._spread_bounds(inst)
+    assert (hi - lo).x > 3.9, f"instance measured as {(hi - lo)[:]}"
+    _spread_select([inst, small])
+    assert bpy.ops.et.spread_out(gap=0.1) == {'FINISHED'}
+    _spread_no_overlap([inst, small])
+    bpy.ops.et.restore_layout()
+    _spread_cleanup([inst, small, big])
+    bpy.data.collections.remove(src)
+
+check("spread out: collection instances are measured, not points",
+      spread_collection_instance_has_size)
+
+
+def spread_grandchild_not_moved_twice():
+    top = _spread_cube("SP_Top", 1.0, (0, 0, 0))
+    mid = _spread_cube("SP_Mid", 1.0, (2, 0, 0))
+    low = _spread_cube("SP_Low", 1.0, (4, 0, 0))
+    mid.parent = top
+    low.parent = mid
+    bpy.context.view_layer.update()
+    rel_before = top.matrix_world.inverted() @ low.matrix_world
+    other = _spread_cube("SP_Other", 2.0, (0, 0, 0))
+    _spread_select([top, low, other])       # mid is not selected
+    assert bpy.ops.et.spread_out() == {'FINISHED'}
+    bpy.context.view_layer.update()
+    rel_after = top.matrix_world.inverted() @ low.matrix_world
+    assert _same_matrix(rel_before, rel_after), "grandchild moved on its own"
+    assert et._SPREAD_KEY not in low
+    bpy.ops.et.restore_layout()
+    _spread_cleanup([low, mid, top, other])
+
+check("spread out: a grandchild under a selected ancestor is not moved twice",
+      spread_grandchild_not_moved_twice)
+
+
+def spread_survives_applied_location():
+    # Batch Export applies location; Restore must still put geometry back.
+    objs = [_spread_cube(f"SP_Apply_{i}", 1.0 + i, (1, 2, 3)) for i in range(2)]
+    before = _spread_footprints(objs)
+    _spread_select(objs)
+    bpy.ops.et.spread_out()
+    bpy.ops.object.transform_apply(location=True, rotation=False, scale=False)
+    for o in objs:
+        o.select_set(False)
+    assert bpy.ops.et.restore_layout() == {'FINISHED'}   # nothing selected: whole scene
+    after = _spread_footprints(objs)
+    for name in before:
+        for a, b in zip(before[name], after[name]):
+            assert (a - b).length < 1e-4, f"{name}: {a[:]} != {b[:]}"
+    _spread_cleanup(objs)
+
+check("spread out: restore still right after location is applied",
+      spread_survives_applied_location)
+
+
+def spread_by_collection_blocks():
+    ca = bpy.data.collections.new("SP_A")
+    cb = bpy.data.collections.new("SP_B")
+    bpy.context.scene.collection.children.link(ca)
+    bpy.context.scene.collection.children.link(cb)
+    a = [_spread_cube(f"SP_A{i}", 1.0, coll=ca) for i in range(3)]
+    b = [_spread_cube(f"SP_B{i}", 1.0, coll=cb) for i in range(3)]
+    _spread_select(a + b)
+    assert bpy.ops.et.spread_out(by_collection=True, gap=0.5) == {'FINISHED'}
+    _spread_no_overlap(a + b)
+    fa = _spread_footprints(a).values()
+    fb = _spread_footprints(b).values()
+    a_top = max(hi.y for _lo, hi in fa)
+    b_bottom = min(lo.y for lo, _hi in fb)
+    assert a_top < b_bottom, f"blocks interleave: A to {a_top}, B from {b_bottom}"
+    bpy.ops.et.restore_layout()
+    _spread_cleanup(a + b)
+    bpy.data.collections.remove(ca)
+    bpy.data.collections.remove(cb)
+
+check("spread out: one block per collection", spread_by_collection_blocks)
+
+
+def restore_with_nothing_spread():
+    _spread_select([])
+    assert bpy.ops.et.restore_layout() == {'CANCELLED'}
+
+check("restore layout: nothing spread is reported, not an error",
+      restore_with_nothing_spread)
+
+
 # --- unregister ------------------------------------------------------------
 check("unregister()", et.unregister)
 
