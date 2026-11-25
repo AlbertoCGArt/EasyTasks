@@ -2,7 +2,10 @@
 
 All notable changes to Easy Tasks are recorded here.
 
-## [Unreleased]
+## [2.8.4]
+
+Copy Onto puts a copy of one piece exactly where others stand, with their
+position and rotation, and can swap them out while it's at it.
 
 ### Added
 - **Copy Onto** (Model ▸ Object, and `Shift+Q`). Select the spots, then the
