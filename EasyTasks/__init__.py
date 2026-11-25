@@ -17,7 +17,7 @@ bl_info = {
     "description": "Scene organisation, mesh cleanup, modelling analysis, and "
                    "Megascans import with paintable material blending.",
     "blender": (3, 0, 0),
-    "version": (2, 8, 4),
+    "version": (2, 8, 5),
     "location": "View3D > Sidebar > Easy Tasks, Ctrl+Shift+X, Shift+Alt+X, Shift+Q",
     "warning": "",
     "doc_url": "https://github.com/AlbertoCGArt/EasyTasks",

@@ -2,7 +2,11 @@
 
 All notable changes to Easy Tasks are recorded here.
 
-## [Unreleased]
+## [2.8.5]
+
+Copy Onto by clicking: pick an end on the piece, see a see-through copy
+where it will land, click to place. And Move Onto, for when the piece
+itself should go.
 
 ### Added
 - **Copy Onto, by clicking.** With only the piece selected, Copy Onto now
