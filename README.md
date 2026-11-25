@@ -29,7 +29,7 @@ Easy Tasks logo:
 | Panel | Holds |
 | --- | --- |
 | **Organize** | Assign to Category, and the collection tools (Project Structure, Arrange Scene, Color Sync, Isolate, Select, Swap, Rename, Visibility Bookmark) |
-| **Model** | Origin, Drop It, Smart Duplicate, Copy Onto, Place Reference Image, Spread Out / Restore, normals and mesh cleanup, Quick Mirror |
+| **Model** | Origin, Drop It, Smart Duplicate, Copy / Move Onto, Place Reference Image, Spread Out / Restore, normals and mesh cleanup, Quick Mirror |
 | **Materials** | Megascans Material, Blend Materials, Consolidate — plus Blend Mask when a blended material is active |
 | **Check** | Silhouette / Cavity / Face Stretch previews, UV Health, Stacked UVs, statistics |
 | **Export** | Batch Export, Generate LODs, Scene Snapshot |
@@ -291,7 +291,30 @@ after Batch Export has applied location — and with nothing selected it
 restores the whole scene.
 
 ### Copy Onto
-Select the spots, then the piece to copy last, and click: a copy of the piece
+**By clicking.** Select just the piece and run Copy Onto. Hover it: the face
+or rim under the mouse is outlined — a pipe's end cap, an open pipe's rim, a
+flat region, or a single face. Click it, then hover where it should go: a
+see-through copy follows the mouse, meeting the face or rim under it face to
+face and centre on centre. Click to place.
+
+| While placing | |
+| --- | --- |
+| `Ctrl` + wheel | Spin 15° about the meeting point — to line up flange bolts |
+| `F` | Flip, so the piece points the other way |
+| `M` | Move the piece itself instead of copying it (before the first click) |
+| `Shift` + click | Place and keep going; new copies' ends are targets too |
+| Right-click | Pick the "from" face again |
+| `Esc` | Done |
+
+The view orbits, pans and zooms as usual the whole time. Because it meets
+faces rather than origins, it works between pieces whose origins sit
+anywhere.
+
+**Move Onto**, next to it, is the same tool moving the piece itself instead
+of a copy — by clicking, or with one spot selected and the piece last. The
+redo panel's **Move** checkbox switches between the two after the fact.
+
+**By origin.** Select the spots, then the piece to copy last, and click: a copy of the piece
 lands on every spot with that spot's position and rotation. A horizontal pipe
 dropped in exactly where a vertical one stands, or a light fitting on every
 ceiling marker at once — no duplicate, move, copy-location, copy-rotation.

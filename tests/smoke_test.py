@@ -3543,6 +3543,247 @@ check("copy onto: only the source selected is refused; its parent is never repla
       copy_onto_needs_a_spot)
 
 
+def move_onto_by_spot():
+    source, spots, *colls = _copy_onto_setup()
+    flange = _spread_cube("MO_Flange", 0.3, (10, 0, 3), coll=colls[0])
+    flange.parent = source
+    flange.matrix_parent_inverse = source.matrix_world.inverted()
+    bpy.context.view_layer.update()
+    rel = source.matrix_world.inverted() @ flange.matrix_world
+    # Two spots: refused, nothing moves.
+    before_mw = source.matrix_world.copy()
+    res, new = _copy_onto_run(source, spots, move=True)
+    assert res == {'CANCELLED'} and not new
+    assert _same_matrix(source.matrix_world, before_mw)
+    # One spot: the piece itself goes there, children along, no copies.
+    spot = spots[1]
+    res, new = _copy_onto_run(source, [spot], move=True)
+    assert res == {'FINISHED'}, res
+    assert not new, f"Move Onto made copies: {[o.name for o in new]}"
+    loc, rot, _ = spot.matrix_world.decompose()
+    s_loc, s_rot, s_scale = source.matrix_world.decompose()
+    assert (s_loc - loc).length < 1e-4 and s_rot.rotation_difference(rot).angle < 1e-4
+    assert (s_scale - _Vec((1, 1, 4))).length < 1e-4, "kept its own scale"
+    assert _same_matrix(source.matrix_world.inverted() @ flange.matrix_world, rel)
+    assert source.select_get() and bpy.context.view_layer.objects.active == source
+    # Replace, into the spot's collection: a straight swap.
+    res, _new = _copy_onto_run(source, [spots[0]], move=True, replace=True,
+                               place_in='TARGET')
+    assert res == {'FINISHED'}
+    assert "CO_Spot0" not in bpy.data.objects, "Replace kept the spot"
+    assert source.users_collection[0] == colls[1], "not moved into the spot's collection"
+    assert flange.users_collection[0] == colls[1], "child left behind in the old collection"
+    _copy_onto_teardown(colls)
+
+check("move onto: by spot, children along, replace into the spot's collection",
+      move_onto_by_spot)
+
+
+# --- Copy Onto, interactive: features, placement, replay ----------------------
+import json as _json
+
+# The suite's own scene has objects near the origin that rays would hit.
+_CO_O = _Vec((200.0, 200.0, 0.0))
+
+
+def _P(x, y, z):
+    return _CO_O + _Vec((x, y, z))
+
+
+def _co_pipe(name, fill='NGON', loc=tuple(_P(0, 0, 0)), rot=(0, 0, 0), depth=2.0):
+    bpy.ops.mesh.primitive_cylinder_add(vertices=32, radius=0.5, depth=depth,
+                                        end_fill_type=fill, location=loc,
+                                        rotation=rot)
+    ob = bpy.context.active_object
+    ob.name = name
+    bpy.context.view_layer.update()
+    return ob
+
+
+def _co_session(source):
+    return et._CopyOntoSession(bpy.context, source)
+
+
+def _near(a, b, eps=1e-3):
+    return (_Vec(a) - _Vec(b)).length < eps
+
+
+def _co_bounds(ob):
+    bpy.context.view_layer.update()
+    return et._spread_bounds(ob)
+
+
+def co_features():
+    made = []
+    for fill in ('NGON', 'TRIFAN'):
+        p = _co_pipe(f"COI_Cap_{fill}", fill, loc=tuple(_P(0, 0, 0)))
+        made.append(p)
+        s = _co_session(p)
+        f = s.hover(_P(0.2, 0.1, 5), _Vec((0, 0, -1)))
+        assert f is not None and f.kind == 'FLAT', (fill, f and f.kind)
+        assert _near(f.center, _P(0, 0, 1)), (fill, f.center[:])
+        assert _near(f.normal, (0, 0, 1)), (fill, f.normal[:])
+        # The wall of a capped pipe, by an end: that end's cap.
+        f = s.hover(_P(5, 0.05, -0.8), _Vec((-1, 0, 0)))
+        assert f is not None and f.kind == 'FLAT', (fill, f and f.kind)
+        assert _near(f.center, _P(0, 0, -1)) and _near(f.normal, (0, 0, -1)), \
+            (fill, f.center[:], f.normal[:])
+    # A plain cube face is its own feature: its neighbours are corners, not caps.
+    bpy.ops.mesh.primitive_cube_add(size=2, location=tuple(_P(20, 0, 0)))
+    cube = bpy.context.active_object
+    made.append(cube)
+    bpy.context.view_layer.update()
+    f = _co_session(cube).hover(_P(20.3, 0.2, 5), _Vec((0, 0, -1)))
+    assert f.kind == 'FACE' and _near(f.center, _P(20, 0, 1)), (f.kind, f.center[:])
+    # An open pipe: pointing at the wall near an end means that end's rim.
+    p = _co_pipe("COI_Open", 'NOTHING', loc=tuple(_P(0, 0, 0)))
+    made.append(p)
+    s = _co_session(p)
+    f = s.hover(_P(5, 0.05, 0.8), _Vec((-1, 0, 0)))
+    assert f is not None and f.kind == 'RIM', f and f.kind
+    assert _near(f.center, _P(0, 0, 1)) and _near(f.normal, (0, 0, 1)), (f.center[:], f.normal[:])
+    f = s.hover(_P(5, 0.05, -0.8), _Vec((-1, 0, 0)))
+    assert _near(f.center, _P(0, 0, -1)) and _near(f.normal, (0, 0, -1)), (f.center[:], f.normal[:])
+    # A subdivided plane: one flat region, centred on the whole plane even
+    # when the mouse is over a corner quad.
+    bpy.ops.mesh.primitive_grid_add(x_subdivisions=6, y_subdivisions=6, size=2,
+                                    location=tuple(_P(10, 0, 0)))
+    g = bpy.context.active_object
+    made.append(g)
+    bpy.context.view_layer.update()
+    s = _co_session(g)
+    f = s.hover(_P(10.9, 0.9, 3), _Vec((0, 0, -1)))
+    assert f.kind == 'FLAT' and _near(f.center, _P(10, 0, 0)), (f.kind, f.center[:])
+    assert len(f.outline) >= 20, f"outline should be the plane's border, got {len(f.outline)}"
+    # Missing the piece entirely finds nothing.
+    assert s.hover(_P(50, 50, 5), _Vec((0, 0, -1))) is None
+    _spread_cleanup(made)
+
+check("copy onto interactive: caps, open rims and flat regions are found",
+      co_features)
+
+
+def co_place_end_to_end():
+    upright = _co_pipe("COI_Up", loc=tuple(_P(0, 0, 0)))
+    lying = _co_pipe("COI_Lying", loc=tuple(_P(5, 0, 1)), rot=(0, 1.5708, 0))
+    s = _co_session(lying)
+    # 1: the lying pipe's end facing -X (its cap sits at x = 4)
+    f = s.hover(_P(2, 0.1, 1.05), _Vec((1, 0, 0)))
+    assert f is not None and _near(f.center, _P(4, 0, 1)), f and f.center[:]
+    assert s.click() == 'PICKED'
+    # 2: the upright pipe's top cap
+    s.hover(_P(0.1, 0.2, 6), _Vec((0, 0, -1)))
+    assert s.delta is not None, "no preview over a valid target"
+    assert s.click() == 'PLACED'
+    assert len(s.copies) == 1
+    copy = s.copies[0]
+    lo, hi = _co_bounds(copy)
+    assert _near((lo.x, lo.y, lo.z), _P(-0.5, -0.5, 1.0), 1e-2) and \
+        _near((hi.x, hi.y, hi.z), _P(0.5, 0.5, 3.0), 1e-2), \
+        f"copy should stand on the upright pipe: {lo[:]} - {hi[:]}"
+    assert _near(lying.matrix_world.translation, _P(5, 0, 1)), "source moved in copy mode"
+    _spread_cleanup([copy, upright, lying])
+
+check("copy onto interactive: end picked on one pipe lands on another's cap",
+      co_place_end_to_end)
+
+
+def co_spin_flip_move():
+    upright = _co_pipe("COI_Up2", loc=tuple(_P(0, 0, 0)))
+    lying = _co_pipe("COI_Lying2", loc=tuple(_P(5, 0, 1)), rot=(0, 1.5708, 0))
+    s = _co_session(lying)
+    s.hover(_P(2, 0.1, 1.05), _Vec((1, 0, 0)))
+    s.click()
+    s.hover(_P(0.1, 0.2, 6), _Vec((0, 0, -1)))
+    plain = s.delta.copy()
+    s.spin_by(2)
+    turned = s.delta
+    # Spinning turns about the target's normal through its centre: the
+    # centre stays put, the matrix does not.
+    assert _near(turned @ _P(4, 0, 1), _P(0, 0, 1)), "spin moved the meeting point"
+    assert not _same_matrix(plain, turned), "spin changed nothing"
+    angle = (plain.to_quaternion().rotation_difference(turned.to_quaternion())).angle
+    assert abs(angle - 0.5236) < 1e-3, f"two steps should be 30 degrees, got {angle}"
+    s.spin_by(-2)
+    s.toggle_flip()
+    # Flipped: the piece points the same way as the target's normal, so it
+    # hangs down into the upright pipe instead of standing on it.
+    s.click()
+    lo, hi = _co_bounds(s.copies[0])
+    assert _near((lo.z, hi.z), (-1.0, 1.0), 1e-2), (lo.z, hi.z)
+    _spread_cleanup(s.copies)
+    # Move mode: the piece itself goes, nothing is copied.
+    before = set(bpy.data.objects)
+    m = _co_session(lying)
+    m.move = True
+    m.hover(_P(2, 0.1, 1.05), _Vec((1, 0, 0)))
+    m.click()
+    m.hover(_P(0.1, 0.2, 6), _Vec((0, 0, -1)))
+    assert m.click() == 'PLACED'
+    assert set(bpy.data.objects) == before, "move mode made a copy"
+    lo, hi = _co_bounds(lying)
+    assert _near((lo.z, hi.z), (1.0, 3.0), 1e-2), (lo.z, hi.z)
+    _spread_cleanup([upright, lying])
+
+check("copy onto interactive: spin, flip and move mode", co_spin_flip_move)
+
+
+def co_pipe_run_and_open_rims():
+    # Open pipes, and a copy of the piece added onto its own far end.
+    p = _co_pipe("COI_Run", 'NOTHING', loc=tuple(_P(0, 0, 0)))
+    s = _co_session(p)
+    f = s.hover(_P(5, 0.05, -0.8), _Vec((-1, 0, 0)))      # bottom rim
+    assert f.kind == 'RIM'
+    s.click()
+    t = s.hover(_P(5, 0.05, 0.8), _Vec((-1, 0, 0)))       # its own top rim
+    assert t is not None and _near(t.center, _P(0, 0, 1)), t and t.center[:]
+    s.click()
+    first = s.copies[0]
+    lo, hi = _co_bounds(first)
+    assert _near((lo.z, hi.z), (1.0, 3.0), 1e-2), (lo.z, hi.z)
+    # Keep going: the new copy's top rim is a target too.
+    t = s.hover(_P(5, 0.05, 2.8), _Vec((-1, 0, 0)))
+    assert t is not None and _near(t.center, _P(0, 0, 3)), t and t.center[:]
+    s.click()
+    lo, hi = _co_bounds(s.copies[1])
+    assert _near((lo.z, hi.z), (3.0, 5.0), 1e-2), (lo.z, hi.z)
+    _spread_cleanup(s.copies + [p])
+
+check("copy onto interactive: open rims, and a run built onto its own copies",
+      co_pipe_run_and_open_rims)
+
+
+def co_replay_and_ghost():
+    p = _co_pipe("COI_Replay", loc=tuple(_P(0, 0, 0)))
+    ghost = et._co_ghost_triangles(bpy.context, [p])
+    assert ghost is not None and len(ghost) % 3 == 0 and len(ghost) > 0
+    assert abs(ghost[:, 2].max() - 1.0) < 1e-4 and abs(ghost[:, 2].min() + 1.0) < 1e-4
+    target = _Mx.Translation((7, 0, 0)) @ _Eu((0.4, 0, 0)).to_matrix().to_4x4()
+    data = _json.dumps({"move": False,
+                        "mats": [et._co_matrix_to_list(target)] * 2})
+    _spread_select([p])
+    before = set(bpy.data.objects)
+    assert bpy.ops.et.copy_onto(placements=data, linked=True) == {'FINISHED'}
+    bpy.context.view_layer.update()
+    new = [o for o in bpy.data.objects if o not in before]
+    assert len(new) == 2, [o.name for o in new]
+    for c in new:
+        assert _same_matrix(c.matrix_world, target), "replayed copy in the wrong place"
+        assert c.data is p.data, "Linked ignored on replay"
+    # The Move checkbox decides on replay: a copied run, re-done as a move.
+    _spread_select([p])
+    before = set(bpy.data.objects)
+    data = _json.dumps({"move": False, "mats": [et._co_matrix_to_list(target)]})
+    assert bpy.ops.et.copy_onto(placements=data, move=True) == {'FINISHED'}
+    bpy.context.view_layer.update()
+    assert set(bpy.data.objects) == before, "move replay made a copy"
+    assert _same_matrix(p.matrix_world, target), "move replay did not move"
+    _spread_cleanup(new + [p])
+
+check("copy onto interactive: redo replays placements; ghost geometry is right",
+      co_replay_and_ghost)
+
+
 # --- unregister ------------------------------------------------------------
 check("unregister()", et.unregister)
 

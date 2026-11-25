@@ -2,7 +2,26 @@
 
 All notable changes to Easy Tasks are recorded here.
 
-## [2.8.4]
+## [Unreleased]
+
+### Added
+- **Copy Onto, by clicking.** With only the piece selected, Copy Onto now
+  asks for two clicks instead of spots: the face or rim on the piece to copy
+  from, then the face or rim it goes on. The two meet face to face, centre on
+  centre, so the objects' origins no longer matter. What's under the mouse is
+  outlined as you move — a pipe's end cap, an open pipe's rim, a flat region,
+  or a single face — and a see-through copy shows where the piece will land
+  before you click. `Ctrl`+wheel spins it 15° about the meeting point, `F`
+  flips it, `M` moves the piece instead of copying it, `Shift`+click places
+  and keeps going (each new copy's ends are targets too, so a run builds
+  itself), right-click picks the "from" end again, and `Esc` finishes. The
+  view can be orbited and zoomed throughout. Selecting spots and then the
+  piece still copies by origin, as before.
+- **Move Onto**, beside Copy Onto and in `Shift+Q`: the same tool, moving the
+  piece itself instead of copying it. By clicking it works the same way; with
+  one spot selected and the piece last, the piece jumps onto the spot (and
+  with Replace, swaps it out). The redo panel's **Move** checkbox switches
+  either one between moving and copying after the fact.
 
 Copy Onto puts a copy of one piece exactly where others stand, with their
 position and rotation, and can swap them out while it's at it.

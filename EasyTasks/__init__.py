@@ -27,6 +27,7 @@ bl_info = {
 
 import os
 import re
+import json
 import datetime
 import numpy as np
 import mathutils
@@ -1535,6 +1536,7 @@ class ET_MT_FavToolsMenu(bpy.types.Menu):
         layout.operator('et.drop_it',          text='Drop It',          icon='TRIA_DOWN_BAR')
         layout.operator('et.smart_duplicate',  text='Smart Duplicate',  icon='DUPLICATE')
         layout.operator('et.copy_onto',        text='Copy Onto',        icon='PASTEDOWN')
+        layout.operator('et.copy_onto',        text='Move Onto',        icon='EMPTY_ARROWS').move = True
         layout.operator('et.spread_out',       text='Spread Out',       icon='MESH_GRID')
         layout.operator('et.restore_layout',   text='Restore Layout',   icon='LOOP_BACK')
         layout.operator('et.wnormals_bevel',   text='WNormals + Bevel', icon='MOD_NORMALEDIT')
@@ -6154,14 +6156,553 @@ def _copy_hierarchy(src, linked, collections_for, scene):
     return top
 
 
+# --- Interactive Copy Onto: what is under the mouse -------------------------
+# With only the piece selected, Copy Onto asks for two clicks: the face or rim
+# on the piece to copy *from*, then the face or rim to put it *on*. The two
+# meet face to face, centre on centre, so origins no longer matter.
+#
+# A "feature" is a centre, an outward normal and an outline to draw, found
+# from the face under the mouse:
+#   - a flat region (a pipe's end cap, a flange face, a crate side): the
+#     coplanar faces around the hit, centred on their area-weighted centroid,
+#     so a ring-shaped flange face still centres on its hole;
+#   - an open rim: a lone face on a curved wall next to a hole in the mesh,
+#     which on an uncapped pipe is how you point at its end;
+#   - otherwise the single face that was hit.
+# Everything is read from the evaluated mesh, whose face indices are the ones
+# ray casts report, and cached per mesh for the length of one session.
+
+_CO_PLANAR_DOT = 0.9986          # cos 3 degrees
+_CO_REGION_LIMIT = 20000         # a huge flat floor stops growing here
+
+
+class _CoFeature:
+    __slots__ = ("center", "normal", "outline", "kind")
+
+    def __init__(self, center, normal, outline, kind):
+        self.center  = center    # Vector
+        self.normal  = normal    # Vector, unit, pointing out of the surface
+        self.outline = outline   # [(Vector, Vector), ...] segments
+        self.kind    = kind      # 'FLAT', 'RIM', 'FACE' or 'POINT'
+
+    def transformed(self, matrix):
+        m3 = matrix.to_3x3()
+        normal = (m3.inverted_safe().transposed() @ self.normal).normalized()
+        return _CoFeature(matrix @ self.center, normal,
+                          [(matrix @ a, matrix @ b) for a, b in self.outline],
+                          self.kind)
+
+
+class _CoMesh:
+    """Topology of one evaluated mesh, read once with foreach_get."""
+
+    def __init__(self, mesh):
+        nv, nf = len(mesh.vertices), len(mesh.polygons)
+        ne, nl = len(mesh.edges), len(mesh.loops)
+
+        def read(seq, attr, n, dtype, width=1):
+            buf = np.empty(n * width, dtype)
+            seq.foreach_get(attr, buf)
+            return buf.reshape(-1, width) if width > 1 else buf
+
+        self.co = read(mesh.vertices, 'co', nv, np.float32, 3).astype(np.float64)
+        self.fn = read(mesh.polygons, 'normal', nf, np.float32, 3).astype(np.float64)
+        self.fc = read(mesh.polygons, 'center', nf, np.float32, 3).astype(np.float64)
+        self.fa = read(mesh.polygons, 'area', nf, np.float32).astype(np.float64)
+        self.ls = read(mesh.polygons, 'loop_start', nf, np.int32)
+        self.lt = read(mesh.polygons, 'loop_total', nf, np.int32)
+        self.lv = read(mesh.loops, 'vertex_index', nl, np.int32)
+        self.le = read(mesh.loops, 'edge_index', nl, np.int32)
+        self.ev = read(mesh.edges, 'vertices', ne, np.int32, 2)
+
+        face_of_loop = np.repeat(np.arange(nf, dtype=np.int32), self.lt)
+        self.edge_count = np.bincount(self.le, minlength=ne)
+        order = np.argsort(self.le, kind='stable')
+        first = np.searchsorted(self.le[order], np.arange(ne))
+        faces_sorted = face_of_loop[order]
+        safe = np.minimum(first, max(nl - 1, 0))
+        safe2 = np.minimum(first + 1, max(nl - 1, 0))
+        self.ef0 = np.where(self.edge_count >= 1, faces_sorted[safe], -1) if nl else np.full(ne, -1)
+        self.ef1 = np.where(self.edge_count >= 2, faces_sorted[safe2], -1) if nl else np.full(ne, -1)
+
+        lo, hi = (self.co.min(axis=0), self.co.max(axis=0)) if nv else (np.zeros(3), np.zeros(3))
+        self.size = float(np.linalg.norm(hi - lo)) or 1.0
+        self.middle = self.co.mean(axis=0) if nv else np.zeros(3)
+        self._rims = None
+        self._features = {}
+
+    def face_edges(self, f):
+        s = self.ls[f]
+        return self.le[s:s + self.lt[f]]
+
+    def face_verts(self, f):
+        s = self.ls[f]
+        return self.lv[s:s + self.lt[f]]
+
+    def _segments(self, edges):
+        V = mathutils.Vector
+        return [(V(self.co[a]), V(self.co[b])) for a, b in self.ev[list(edges)]]
+
+    def region(self, face):
+        """Faces coplanar with face and connected to it."""
+        n0, c0 = self.fn[face], self.fc[face]
+        tol = max(self.size * 1e-4, 1e-6)
+        seen, stack = {face}, [face]
+        while stack and len(seen) < _CO_REGION_LIMIT:
+            f = stack.pop()
+            for e in self.face_edges(f):
+                for g in (int(self.ef0[e]), int(self.ef1[e])):
+                    if g < 0 or g in seen:
+                        continue
+                    if float(self.fn[g] @ n0) < _CO_PLANAR_DOT:
+                        continue
+                    if abs(float((self.fc[g] - c0) @ n0)) > tol:
+                        continue
+                    seen.add(g)
+                    stack.append(g)
+        return seen
+
+    def rims(self):
+        """Closed loops of boundary edges (holes in the mesh), each as
+        (vertex indices, centre, normal, radius)."""
+        if self._rims is not None:
+            return self._rims
+        rims = []
+        boundary = np.nonzero(self.edge_count == 1)[0]
+        nbrs = {}
+        for e in boundary:
+            a, b = int(self.ev[e][0]), int(self.ev[e][1])
+            nbrs.setdefault(a, []).append(b)
+            nbrs.setdefault(b, []).append(a)
+        done = set()
+        for start in nbrs:
+            if start in done:
+                continue
+            chain, prev, cur = [start], None, start
+            done.add(start)
+            while True:
+                nxt = [v for v in nbrs[cur] if v != prev and v not in done]
+                if not nxt:
+                    break
+                prev, cur = cur, nxt[0]
+                chain.append(cur)
+                done.add(cur)
+            if len(chain) < 3:
+                continue
+            pts = self.co[chain]
+            centre = pts.mean(axis=0)
+            # Newell's method: a robust plane normal for a closed polygon.
+            nxt_pts = np.roll(pts, -1, axis=0)
+            normal = np.array([
+                np.sum((pts[:, 1] - nxt_pts[:, 1]) * (pts[:, 2] + nxt_pts[:, 2])),
+                np.sum((pts[:, 2] - nxt_pts[:, 2]) * (pts[:, 0] + nxt_pts[:, 0])),
+                np.sum((pts[:, 0] - nxt_pts[:, 0]) * (pts[:, 1] + nxt_pts[:, 1]))])
+            length = np.linalg.norm(normal)
+            if length < 1e-12:
+                continue
+            normal /= length
+            # Point out of the mesh: away from the middle of the geometry.
+            if float(normal @ (centre - self.middle)) < 0.0:
+                normal = -normal
+            radius = float(np.linalg.norm(pts - centre, axis=1).mean())
+            rims.append((chain, centre, normal, radius))
+        self._rims = rims
+        return rims
+
+    def _rim_for(self, face, hit):
+        # A wall face can touch two rims (one tall face spanning a whole
+        # pipe), so of the rims it touches, or failing that the rims close
+        # by, the one nearest the mouse wins.
+        verts = set(int(v) for v in self.face_verts(face))
+        point = np.asarray(hit, dtype=np.float64)
+        touching, near = [], []
+        for rim in self.rims():
+            chain, centre, _normal, radius = rim
+            d = float(np.linalg.norm(point - centre))
+            if verts.intersection(chain):
+                touching.append((d, rim))
+            elif d < 1.5 * radius:
+                near.append((d, rim))
+        pool = touching or near
+        return min(pool, key=lambda dr: dr[0])[1] if pool else None
+
+    def _cap_for(self, face, hit):
+        """A flat cap bordering face across a corner, nearest hit: on a capped
+        pipe, pointing at the wall by an end means that end."""
+        point = mathutils.Vector(hit)
+        best = None
+        for e in self.face_edges(face):
+            for g in (int(self.ef0[e]), int(self.ef1[e])):
+                if g < 0 or g == face:
+                    continue
+                if float(self.fn[g] @ self.fn[face]) > 0.5:
+                    continue          # a smooth continuation, not a corner
+                cap = self.feature(g, hit, neighbours=False)
+                if cap.kind != 'FLAT':
+                    continue
+                d = abs((point - cap.center) @ cap.normal)
+                if best is None or d < best[0]:
+                    best = (d, cap)
+        return best[1] if best else None
+
+    def feature(self, face, hit, neighbours=True):
+        """The feature to snap to when the mouse is over face at hit (local)."""
+        # Only flat regions are cached: which rim or face wins depends on
+        # where on the face the mouse is.
+        cached = self._features.get(face)
+        if cached is not None:
+            return cached
+        V = mathutils.Vector
+        region = self.region(face)
+        if len(region) > 1 or self.lt[face] > 4:
+            idx = np.fromiter(region, dtype=np.int64)
+            w = self.fa[idx]
+            centre = (self.fc[idx] * w[:, None]).sum(axis=0) / max(w.sum(), 1e-12)
+            counts = {}
+            for f in idx:
+                for e in self.face_edges(int(f)):
+                    counts[int(e)] = counts.get(int(e), 0) + 1
+            feat = _CoFeature(V(centre), V(self.fn[face]).normalized(),
+                              self._segments(e for e, c in counts.items() if c == 1),
+                              'FLAT')
+            for f in region:
+                self._features[int(f)] = feat
+            return feat
+        rim = self._rim_for(face, hit)
+        if rim is not None:
+            chain, centre, normal, _radius = rim
+            ring = chain + chain[:1]
+            V3 = [V(self.co[v]) for v in ring]
+            return _CoFeature(V(centre), V(normal), list(zip(V3[:-1], V3[1:])), 'RIM')
+        if neighbours:
+            cap = self._cap_for(face, hit)
+            if cap is not None:
+                return cap
+        return _CoFeature(V(self.fc[face]), V(self.fn[face]).normalized(),
+                          self._segments(self.face_edges(face)), 'FACE')
+
+
+def _co_point_feature(location, normal, size):
+    """A plain hit point, for geometry that is not a mesh."""
+    n = normal.normalized()
+    t = n.orthogonal().normalized() * size
+    b = n.cross(t).normalized() * size
+    ring = [location + t * np.cos(a) + b * np.sin(a)
+            for a in np.linspace(0.0, 2.0 * np.pi, 17)]
+    return _CoFeature(location.copy(), n, list(zip(ring[:-1], ring[1:])), 'POINT')
+
+
+def _co_mate_delta(src, dst, spin, flip):
+    """World-space change that puts src (a world feature) on dst, facing it."""
+    want = dst.normal if flip else -dst.normal
+    turn = src.normal.rotation_difference(want).to_matrix().to_4x4()
+    twist = mathutils.Matrix.Rotation(spin, 4, dst.normal)
+    return (mathutils.Matrix.Translation(dst.center) @ twist @ turn
+            @ mathutils.Matrix.Translation(-src.center))
+
+
+def _co_matrix_to_list(m):
+    return [float(v) for row in m for v in row]
+
+
+def _co_list_to_matrix(v):
+    return mathutils.Matrix([v[0:4], v[4:8], v[8:12], v[12:16]])
+
+
+class _CopyOntoSession:
+    """
+    The state behind interactive Copy Onto, kept apart from the modal operator
+    so it can be driven by rays in tests. hover() follows the mouse; click()
+    picks the "from" feature, then places; spin/flip/move adjust.
+    """
+
+    SPIN_STEP = np.radians(15.0)
+
+    def __init__(self, context, source, linked=False):
+        self.context = context
+        self.scene = context.scene
+        self.source = source
+        self.linked = linked
+        self.tree = [source] + _spread_descendants(source)
+        self.move = False
+        self.phase = 'FROM'
+        self.spin = 0.0
+        self.flip = False
+        self.hover_feat = None   # world feature under the mouse
+        self.from_feat = None    # world feature picked on the source
+        self.delta = None        # world change for the ghost / placement
+        self.placements = []     # world matrices of placed tops
+        self.copies = []
+        self._meshes = {}
+
+    # -- geometry ------------------------------------------------------------
+    def _mesh_info(self, obj, depsgraph):
+        key = obj.name
+        info = self._meshes.get(key)
+        if info is None:
+            ev = obj.evaluated_get(depsgraph)
+            info = _CoMesh(ev.data)
+            self._meshes[key] = info
+        return info
+
+    def _pick_source(self, origin, direction):
+        dg = self.context.evaluated_depsgraph_get()
+        best = None
+        for obj in self.tree:
+            if obj.type != 'MESH' or not obj.visible_get():
+                continue
+            mw = obj.matrix_world
+            inv = mw.inverted_safe()
+            o_l = inv @ origin
+            d_l = (inv.to_3x3() @ direction).normalized()
+            ok, loc, _nor, idx = obj.ray_cast(o_l, d_l, depsgraph=dg)
+            if not ok or idx < 0:
+                continue
+            dist = (mw @ loc - origin).length
+            if best is None or dist < best[0]:
+                best = (dist, obj, loc, idx, mw)
+        if best is None:
+            return None
+        _d, obj, loc, idx, mw = best
+        return self._mesh_info(obj, dg).feature(idx, loc).transformed(mw)
+
+    def _pick_target(self, origin, direction):
+        self.context.view_layer.update()
+        dg = self.context.evaluated_depsgraph_get()
+        skip = set(self.tree) if self.move else set()
+        start = origin.copy()
+        for _ in range(32):
+            ok, loc, nor, idx, obj, mat = self.scene.ray_cast(dg, start, direction)
+            if not ok:
+                return None
+            if obj in skip:
+                start = loc + direction * 1e-4
+                continue
+            if obj.type == 'MESH' and idx >= 0:
+                info = self._mesh_info(obj, dg)
+                if idx < len(info.lt):
+                    local = mat.inverted_safe() @ loc
+                    return info.feature(idx, local).transformed(mat)
+            return _co_point_feature(loc, nor, max(obj.dimensions) * 0.05 or 0.05)
+        return None
+
+    # -- interaction ---------------------------------------------------------
+    def hover(self, origin, direction):
+        if self.phase == 'FROM':
+            self.hover_feat = self._pick_source(origin, direction)
+            self.delta = None
+        else:
+            self.hover_feat = self._pick_target(origin, direction)
+            self._update_delta()
+        return self.hover_feat
+
+    def _update_delta(self):
+        if self.phase == 'TO' and self.hover_feat is not None:
+            self.delta = _co_mate_delta(self.from_feat, self.hover_feat,
+                                        self.spin, self.flip)
+        else:
+            self.delta = None
+
+    def spin_by(self, steps):
+        self.spin += steps * self.SPIN_STEP
+        self._update_delta()
+
+    def toggle_flip(self):
+        self.flip = not self.flip
+        self._update_delta()
+
+    def back(self):
+        """Pick the 'from' feature again."""
+        self.phase, self.from_feat, self.hover_feat, self.delta = 'FROM', None, None, None
+
+    def click(self):
+        """'PICKED' after the first click, 'PLACED' after a placement, None
+        when nothing is under the mouse."""
+        if self.phase == 'FROM':
+            if self.hover_feat is None:
+                return None
+            self.from_feat = self.hover_feat
+            self.hover_feat = None
+            self.phase = 'TO'
+            return 'PICKED'
+        if self.delta is None:
+            return None
+        world = self.delta @ self.source.matrix_world
+        self.place(world)
+        self.placements.append(world.copy())
+        return 'PLACED'
+
+    def place(self, world):
+        if self.move:
+            self.source.matrix_world = world
+            self.context.view_layer.update()
+            return self.source
+        top = _copy_hierarchy(self.source, self.linked,
+                              lambda o: o.users_collection, self.scene)
+        top.matrix_world = world
+        self.copies.append(top)
+        self.context.view_layer.update()
+        return top
+
+
+# --- Interactive Copy Onto: drawing ------------------------------------------
+
+_CO_GHOST_LIMIT = 400000          # triangles; past this the ghost is skipped
+_CO_COL_FROM   = (1.0, 0.55, 0.1, 1.0)    # orange: the piece's face or rim
+_CO_COL_TO     = (0.25, 0.8, 1.0, 1.0)    # blue: where it will go
+_CO_COL_GHOST  = (0.75, 0.9, 1.0, 0.28)
+
+
+def _co_ghost_triangles(context, objs):
+    """World-space triangle corners of objs as they stand now, (N*3, 3)."""
+    dg = context.evaluated_depsgraph_get()
+    chunks, total = [], 0
+    for obj in objs:
+        if obj.type != 'MESH' or not obj.visible_get():
+            continue
+        ev = obj.evaluated_get(dg)
+        mesh = ev.to_mesh()
+        try:
+            mesh.calc_loop_triangles()
+            nt = len(mesh.loop_triangles)
+            total += nt
+            if not nt or total > _CO_GHOST_LIMIT:
+                continue
+            co = np.empty(len(mesh.vertices) * 3, np.float32)
+            mesh.vertices.foreach_get('co', co)
+            co = co.reshape(-1, 3)
+            tri = np.empty(nt * 3, np.int32)
+            mesh.loop_triangles.foreach_get('vertices', tri)
+            m = np.array(obj.matrix_world, dtype=np.float32)
+            pts = co[tri] @ m[:3, :3].T + m[:3, 3]
+            chunks.append(pts)
+        finally:
+            ev.to_mesh_clear()
+    if not chunks or total > _CO_GHOST_LIMIT:
+        return None
+    return np.concatenate(chunks).astype(np.float32)
+
+
+def _co_shader(kind):
+    """A built-in shader by its current name, or its pre-4.0 one."""
+    import gpu
+    # Thin lines are better than none where the polyline shader is missing.
+    names = {'LINE': ('POLYLINE_UNIFORM_COLOR', '3D_POLYLINE_UNIFORM_COLOR',
+                      'UNIFORM_COLOR', '3D_UNIFORM_COLOR'),
+             'FILL': ('UNIFORM_COLOR', '3D_UNIFORM_COLOR')}[kind]
+    for name in names:
+        try:
+            return gpu.shader.from_builtin(name), name
+        except (ValueError, TypeError):
+            continue
+    return None, None
+
+
+def _co_draw_lines(segments, colour, width):
+    import gpu
+    from gpu_extras.batch import batch_for_shader
+    if not segments:
+        return
+    shader, name = _co_shader('LINE')
+    if shader is None:
+        return
+    coords = [tuple(p) for seg in segments for p in seg]
+    batch = batch_for_shader(shader, 'LINES', {"pos": coords})
+    shader.bind()
+    if 'POLYLINE' in name:
+        vp = gpu.state.viewport_get()
+        shader.uniform_float("viewportSize", (vp[2], vp[3]))
+        shader.uniform_float("lineWidth", width)
+    shader.uniform_float("color", colour)
+    batch.draw(shader)
+
+
+def _co_cross(feature, size):
+    """A small cross on the feature's centre, in its plane."""
+    n = feature.normal
+    t = n.orthogonal().normalized() * size
+    b = n.cross(t).normalized() * size
+    c = feature.center
+    return [(c - t, c + t), (c - b, c + b), (c, c + n * size * 2.0)]
+
+
+def _co_draw(op):
+    """POST_VIEW callback: the feature under the mouse, the picked one, and a
+    see-through copy of the piece where it would land."""
+    import gpu
+    try:
+        if bpy.context.area != op._area:
+            return
+        s = op._session
+        gpu.state.blend_set('ALPHA')
+        gpu.state.depth_mask_set(False)
+
+        if s.delta is not None and op._ghost is not None:
+            from gpu_extras.batch import batch_for_shader
+            shader, _name = _co_shader('FILL')
+            if shader is not None:
+                batch = op._batches.get('ghost')
+                if batch is None:
+                    batch = batch_for_shader(shader, 'TRIS', {"pos": op._ghost})
+                    op._batches['ghost'] = batch
+                gpu.state.depth_test_set('LESS_EQUAL')
+                gpu.matrix.push()
+                gpu.matrix.multiply_matrix(s.delta)
+                shader.bind()
+                shader.uniform_float("color", _CO_COL_GHOST)
+                batch.draw(shader)
+                gpu.matrix.pop()
+
+        # Outlines sit on the surface, so draw them over it.
+        gpu.state.depth_test_set('NONE')
+        if s.phase == 'TO' and s.from_feat is not None:
+            picked = (s.from_feat.transformed(s.delta) if s.delta is not None
+                      else s.from_feat)
+            _co_draw_lines(picked.outline, _CO_COL_FROM, 2.0)
+        feat = s.hover_feat
+        if feat is not None:
+            colour = _CO_COL_FROM if s.phase == 'FROM' else _CO_COL_TO
+            _co_draw_lines(feat.outline, colour, 3.0)
+            reach = max(((a - feat.center).length for a, _b in feat.outline),
+                        default=0.0)
+            size = max(reach * 0.3, 0.01)
+            _co_draw_lines(_co_cross(feat, size), colour, 2.0)
+    except Exception:
+        # A drawing error must never take the viewport down with it.
+        import traceback
+        traceback.print_exc()
+    finally:
+        gpu.state.depth_test_set('NONE')
+        gpu.state.blend_set('NONE')
+        gpu.state.depth_mask_set(True)
+
+
 class ET_OT_CopyOnto(bpy.types.Operator):
     bl_idname  = "et.copy_onto"
     bl_label   = "Copy Onto"
     bl_description = (
-        "Put a copy of the active object on each other selected object, with "
-        "its position and rotation. Select the spots, then the piece to copy last"
+        "With only a piece selected: click a face or rim on it, then where it "
+        "goes, and a copy meets it face to face. With spots selected and the "
+        "piece last: a copy lands on each spot with its position and rotation"
     )
     bl_options = {"REGISTER", "UNDO"}
+
+    # Placements made interactively, kept so Redo / F9 can rebuild them:
+    # {"move": bool, "mats": [[16 floats], ...]}. Empty means batch mode.
+    placements: bpy.props.StringProperty(options={'HIDDEN', 'SKIP_SAVE'})
+
+    move: bpy.props.BoolProperty(
+        name="Move", default=False, options={'SKIP_SAVE'},
+        description="Move the piece itself instead of copying it")
+
+    @classmethod
+    def description(cls, context, properties):
+        if properties.move:
+            return ("With only a piece selected: click a face or rim on it, "
+                    "then where it goes, and it moves there face to face. "
+                    "With one spot selected and the piece last: it moves onto "
+                    "the spot, taking its position and rotation")
+        return cls.bl_description
 
     match_scale: bpy.props.BoolProperty(
         name="Match Scale", default=False,
@@ -6185,39 +6726,249 @@ class ET_OT_CopyOnto(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        active = context.active_object
-        return (context.mode == 'OBJECT' and active is not None
-                and any(o is not active for o in context.selected_objects))
+        return context.mode == 'OBJECT' and context.active_object is not None
 
+    @staticmethod
+    def _spots(context, source):
+        # Selecting the source together with its own children must not turn
+        # those children into spots.
+        tree = {source, *_spread_descendants(source)}
+        return [o for o in context.selected_objects if o not in tree]
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, 'move')
+        if self.placements:
+            if not self.move:
+                layout.prop(self, 'linked')
+            return
+        names = ('match_scale', 'replace', 'place_in') if self.move else \
+                ('match_scale', 'linked', 'replace', 'place_in')
+        for name in names:
+            layout.prop(self, name)
+
+    # -- interactive ---------------------------------------------------------
+    def invoke(self, context, event):
+        source = context.active_object
+        area = context.area
+        if (self._spots(context, source) or area is None
+                or area.type != 'VIEW_3D'):
+            return self.execute(context)
+        if not any(o.type == 'MESH' for o in [source] + _spread_descendants(source)):
+            self.report({'WARNING'}, "Copy Onto picks faces on meshes; select "
+                                     "spots too to copy by origin instead")
+            return {'CANCELLED'}
+        self._area = area
+        self._session = _CopyOntoSession(context, source, self.linked)
+        self._session.move = self.move
+        self._ghost = _co_ghost_triangles(context, self._session.tree)
+        self._batches = {}
+        self._handle = bpy.types.SpaceView3D.draw_handler_add(
+            _co_draw, (self,), 'WINDOW', 'POST_VIEW')
+        context.window_manager.modal_handler_add(self)
+        self._header(context)
+        return {'RUNNING_MODAL'}
+
+    _NAVIGATION = {
+        'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE', 'TRACKPADPAN',
+        'TRACKPADZOOM', 'MOUSEROTATE', 'MOUSESMARTZOOM',
+        'NUMPAD_0', 'NUMPAD_1', 'NUMPAD_2', 'NUMPAD_3', 'NUMPAD_4',
+        'NUMPAD_5', 'NUMPAD_6', 'NUMPAD_7', 'NUMPAD_8', 'NUMPAD_9',
+        'NUMPAD_PERIOD', 'NUMPAD_PLUS', 'NUMPAD_MINUS', 'HOME',
+    }
+
+    def _header(self, context):
+        s = self._session
+        verb = "Move" if s.move else "Copy"
+        if s.phase == 'FROM':
+            text = (f"{verb} Onto: click the face or rim to {verb.lower()} from"
+                    f"   ·   M: {'copy' if s.move else 'move'} instead"
+                    f"   ·   Esc: cancel")
+        else:
+            text = ("Click where it goes   ·   Ctrl+Wheel: spin 15°"
+                    "   ·   F: flip   ·   "
+                    + ("" if s.move else "Shift+Click: place and keep going   ·   ")
+                    + "Right-click: pick again   ·   Esc: done")
+        self._area.header_text_set(text)
+        if context.workspace is not None:
+            context.workspace.status_text_set(text)
+
+    def _ray(self, context, event):
+        """World ray under the mouse, or None off the 3D view's main region."""
+        from bpy_extras import view3d_utils
+        for region in self._area.regions:
+            if region.type != 'WINDOW':
+                continue
+            x, y = event.mouse_x - region.x, event.mouse_y - region.y
+            if not (0 <= x < region.width and 0 <= y < region.height):
+                return None
+            rv3d = self._area.spaces.active.region_3d
+            origin = view3d_utils.region_2d_to_origin_3d(region, rv3d, (x, y))
+            direction = view3d_utils.region_2d_to_vector_3d(region, rv3d, (x, y))
+            return origin, direction.normalized()
+        return None
+
+    def _finish(self, context, cancelled=False):
+        bpy.types.SpaceView3D.draw_handler_remove(self._handle, 'WINDOW')
+        self._area.header_text_set(None)
+        if context.workspace is not None:
+            context.workspace.status_text_set(None)
+        self._area.tag_redraw()
+        s = self._session
+        if cancelled or not s.placements:
+            return {'CANCELLED'}
+        self.move = s.move      # M may have changed it mid-run
+        self.placements = json.dumps({
+            "move": s.move,
+            "mats": [_co_matrix_to_list(m) for m in s.placements]})
+        placed = [s.source] if s.move else s.copies
+        for o in list(context.selected_objects):
+            o.select_set(False)
+        for o in placed:
+            o.select_set(True)
+        context.view_layer.objects.active = placed[-1]
+        self._report_placed(s.source.name, len(s.placements), s.move)
+        return {'FINISHED'}
+
+    def _report_placed(self, name, count, move):
+        if move:
+            self.report({'INFO'}, f"Moved {name}")
+        else:
+            self.report({'INFO'}, f"Placed {count} cop{'y' if count == 1 else 'ies'} of {name}")
+
+    def modal(self, context, event):
+        s = self._session
+        self._area.tag_redraw()
+        kind, value = event.type, event.value
+
+        if kind in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.ctrl:
+            if s.phase == 'TO':
+                s.spin_by(1 if kind == 'WHEELUPMOUSE' else -1)
+            return {'RUNNING_MODAL'}
+        if kind in self._NAVIGATION or kind.startswith('NDOF'):
+            return {'PASS_THROUGH'}
+        if kind == 'MOUSEMOVE':
+            ray = self._ray(context, event)
+            if ray is None:
+                s.hover_feat, s.delta = None, None
+            else:
+                s.hover(*ray)
+            return {'RUNNING_MODAL'}
+        if value != 'PRESS':
+            return {'RUNNING_MODAL'}
+
+        if kind == 'LEFTMOUSE':
+            result = s.click()
+            if result == 'PICKED':
+                ray = self._ray(context, event)
+                if ray is not None:
+                    s.hover(*ray)
+            elif result == 'PLACED':
+                if s.move or not event.shift:
+                    return self._finish(context)
+                ray = self._ray(context, event)
+                if ray is not None:
+                    s.hover(*ray)
+            self._header(context)
+            return {'RUNNING_MODAL'}
+        if kind == 'F' and s.phase == 'TO':
+            s.toggle_flip()
+        elif kind == 'M' and not s.placements:
+            s.move = not s.move
+            self._header(context)
+        elif kind == 'RIGHTMOUSE' and s.phase == 'TO' and not s.placements:
+            s.back()
+            self._header(context)
+        elif kind in {'ESC', 'RIGHTMOUSE'}:
+            return self._finish(context)
+        return {'RUNNING_MODAL'}
+
+    def _replay(self, context):
+        """Redo / F9 after an interactive run: rebuild its placements."""
+        data = json.loads(self.placements)
+        source = context.active_object
+        mats = [_co_list_to_matrix(m) for m in data.get("mats", [])]
+        if source is None or not mats:
+            return {'CANCELLED'}
+        # The Move checkbox, not the recorded mode, decides: ticking it in
+        # the redo panel turns a copy into a move, and back.
+        if self.move:
+            source.matrix_world = mats[-1]
+            self._report_placed(source.name, 1, True)
+            return {'FINISHED'}
+        copies = []
+        for m in mats:
+            top = _copy_hierarchy(source, self.linked,
+                                  lambda o: o.users_collection, context.scene)
+            top.matrix_world = m
+            copies.append(top)
+        for o in list(context.selected_objects):
+            o.select_set(False)
+        for top in copies:
+            top.select_set(True)
+        context.view_layer.objects.active = copies[-1]
+        self._report_placed(source.name, len(copies), False)
+        return {'FINISHED'}
+
+    # -- batch -----------------------------------------------------------------
     def execute(self, context):
+        if self.placements:
+            return self._replay(context)
         scene  = context.scene
         source = context.active_object
         context.view_layer.update()
 
         source_tree = {source, *_spread_descendants(source)}
-        # Selecting the source together with its own children must not turn
-        # those children into spots.
-        targets = [o for o in context.selected_objects if o not in source_tree]
+        targets = self._spots(context, source)
         if not targets:
             self.report({'WARNING'},
-                        "Select the spots, then the piece to copy last")
+                        "Select the spots, then the piece to copy last — or "
+                        "only the piece, and click where it goes")
             return {'CANCELLED'}
 
         copies = []
-        for target in targets:
+        if self.move:
+            if len(targets) != 1:
+                self.report({'WARNING'}, "Move Onto takes one spot: select it, "
+                                         "then the piece to move last")
+                return {'CANCELLED'}
+            target = targets[0]
+            world = _copy_onto_matrix(source, target, self.match_scale)
             if self.place_in == 'TARGET':
-                def collections_for(_o, t=target):
-                    return t.users_collection
-                parent = target.parent
-            else:
-                def collections_for(o):
-                    return o.users_collection
-                parent = source.parent
-            top = _copy_hierarchy(source, self.linked, collections_for, scene)
-            top.parent = parent
-            top.matrix_parent_inverse = mathutils.Matrix.Identity(4)
-            top.matrix_world = _copy_onto_matrix(source, target, self.match_scale)
-            copies.append(top)
+                spot_colls = list(target.users_collection)
+                for o in source_tree:
+                    old = list(o.users_collection)
+                    linked = [c for c in old if c in spot_colls]
+                    for c in spot_colls:
+                        if c not in old:
+                            try:
+                                c.objects.link(o)
+                                linked.append(c)
+                            except RuntimeError:
+                                pass
+                    if linked:              # never leave it in no collection
+                        for c in old:
+                            if c not in spot_colls:
+                                c.objects.unlink(o)
+                source.parent = target.parent
+                source.matrix_parent_inverse = mathutils.Matrix.Identity(4)
+            source.matrix_world = world
+            copies.append(source)
+        else:
+            for target in targets:
+                if self.place_in == 'TARGET':
+                    def collections_for(_o, t=target):
+                        return t.users_collection
+                    parent = target.parent
+                else:
+                    def collections_for(o):
+                        return o.users_collection
+                    parent = source.parent
+                top = _copy_hierarchy(source, self.linked, collections_for, scene)
+                top.parent = parent
+                top.matrix_parent_inverse = mathutils.Matrix.Identity(4)
+                top.matrix_world = _copy_onto_matrix(source, target, self.match_scale)
+                copies.append(top)
 
         replaced = kept = 0
         if self.replace:
@@ -6253,7 +7004,10 @@ class ET_OT_CopyOnto(bpy.types.Operator):
             top.select_set(True)
         context.view_layer.objects.active = copies[0]
 
-        message = f"Placed {len(copies)} cop{'y' if len(copies) == 1 else 'ies'} of {source.name}"
+        if self.move:
+            message = f"Moved {source.name}"
+        else:
+            message = f"Placed {len(copies)} cop{'y' if len(copies) == 1 else 'ies'} of {source.name}"
         if replaced:
             message += f", replacing {replaced}"
         if kept:
@@ -6615,7 +7369,9 @@ class ET_PT_ModelPanel(bpy.types.Panel):
         col = _section(layout, "Object")
         col.operator('et.drop_it',               text='Drop It',               icon='TRIA_DOWN_BAR')
         col.operator('et.smart_duplicate',       text='Smart Duplicate',       icon='DUPLICATE')
-        col.operator('et.copy_onto',             text='Copy Onto',             icon='PASTEDOWN')
+        row = col.row(align=True)
+        row.operator('et.copy_onto', text='Copy Onto', icon='PASTEDOWN')
+        row.operator('et.copy_onto', text='Move Onto', icon='EMPTY_ARROWS').move = True
         col.operator('et.place_reference_image', text='Place Reference Image', icon='IMAGE_REFERENCE')
         row = col.row(align=True)
         row.operator('et.spread_out',     text='Spread Out', icon='MESH_GRID')
