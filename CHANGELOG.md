@@ -2,7 +2,10 @@
 
 All notable changes to Easy Tasks are recorded here.
 
-## [Unreleased]
+## [2.8.6]
+
+Copy / Move Onto can place freely under the mouse as well as snap to
+centres, keeps pieces square on walls, and cancels on right-click.
 
 ### Added
 - **Copy / Move Onto: Free placement.** `Tab` switches between **Snap**
