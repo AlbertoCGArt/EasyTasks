@@ -27,6 +27,8 @@ itself should go.
   with Replace, swaps it out). The redo panel's **Move** checkbox switches
   either one between moving and copying after the fact.
 
+## [2.8.4]
+
 Copy Onto puts a copy of one piece exactly where others stand, with their
 position and rotation, and can swap them out while it's at it.
 
